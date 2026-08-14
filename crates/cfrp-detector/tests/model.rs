@@ -56,10 +56,11 @@ fn detection_result_serde_contains_all_keys() {
 #[test]
 fn batch_target_serde_roundtrip() {
     let t = Target::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
-    let bt = BatchTarget { target: t };
+    let bt = BatchTarget { target: t, id: 1 };
     let json = serde_json::to_string(&bt).unwrap();
     let bt2: BatchTarget = serde_json::from_str(&json).unwrap();
     assert_eq!(bt.target, bt2.target);
+    assert_eq!(bt.id, bt2.id);
 }
 
 #[test]
@@ -69,11 +70,13 @@ fn batch_result_error_only_serde() {
         target: t,
         result: None,
         error: Some("timeout".into()),
+        id: 42,
     };
     let json = serde_json::to_string(&br).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["error"], "timeout");
     assert!(v["result"].is_null());
+    assert_eq!(v["id"], 42);
 }
 
 #[test]

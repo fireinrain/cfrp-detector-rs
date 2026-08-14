@@ -9,6 +9,14 @@ pub trait CidrSource: Send + Sync {
     fn contains(&self, ip: IpAddr) -> bool;
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CloudflareCidrs {
+    pub fetched_at: Option<u64>,
+    pub source: String,
+    pub ipv4: Vec<String>,
+    pub ipv6: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CloudflareRanges {
     v4: Arc<RwLock<Vec<netip::IpNetLike>>>,
@@ -65,6 +73,25 @@ impl CloudflareRanges {
         Self {
             v4: Arc::new(RwLock::new(Vec::new())),
             v6: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn from_cidrs(cidrs: CloudflareCidrs) -> Self {
+        let mut v4 = Vec::new();
+        let mut v6 = Vec::new();
+        for s in cidrs.ipv4 {
+            if let Some(p) = netip::IpNetLike::parse(&s) {
+                v4.push(p);
+            }
+        }
+        for s in cidrs.ipv6 {
+            if let Some(p) = netip::IpNetLike::parse(&s) {
+                v6.push(p);
+            }
+        }
+        Self {
+            v4: Arc::new(RwLock::new(v4)),
+            v6: Arc::new(RwLock::new(v6)),
         }
     }
 

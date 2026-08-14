@@ -25,6 +25,8 @@ impl fmt::Display for Target {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchTarget {
     pub target: Target,
+    #[serde(default)]
+    pub id: usize,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -94,6 +96,8 @@ pub struct BatchResult {
     pub target: Target,
     pub result: Option<DetectionResult>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub id: usize,
 }
 
 #[cfg(test)]
@@ -201,7 +205,7 @@ mod tests {
     #[test]
     fn batch_target_construction() {
         let t = Target::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-        let bt = BatchTarget { target: t.clone() };
+        let bt = BatchTarget { target: t.clone(), id: 0 };
         assert_eq!(bt.target.ip, t.ip);
         assert_eq!(bt.target.port, t.port);
     }
@@ -213,6 +217,7 @@ mod tests {
             target: t.clone(),
             result: Some(DetectionResult::default()),
             error: None,
+            id: 0,
         };
         assert!(br.result.is_some());
         assert!(br.error.is_none());
@@ -226,6 +231,7 @@ mod tests {
             target: t,
             result: None,
             error: Some("connection refused".into()),
+            id: 0,
         };
         assert!(br.result.is_none());
         assert_eq!(br.error.as_deref(), Some("connection refused"));

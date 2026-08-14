@@ -11,11 +11,21 @@ rust-version.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 http.workspace = true
+libc.workspace = true
 parking_lot.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "performance"
+harness = false

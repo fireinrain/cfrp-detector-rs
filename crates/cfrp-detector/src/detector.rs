@@ -2,20 +2,33 @@ use crate::{DetectorError, Result};
 use crate::{
     cidr::CloudflareRanges,
     cidr::CidrSource,
+    governor::{
+        classify_resource_error, GovernorSnapshot, ResourceGovernor, ResourceGovernorConfig,
+        SystemFdCounter,
+    },
     location::{LocationSource, LocationStore},
     model::{BatchResult, BatchTarget, Confidence, DetectionResult, EdgeInfo, Protocol, Target},
     probe::{ProbeConfig, ProbeEngine},
 };
+use http::HeaderMap;
 use reqwest::{Client, ClientBuilder};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+pub struct GovernorFeedback {
+    pub snapshot: Option<GovernorSnapshot>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct BatchProgress {
     pub completed: usize,
     pub total: usize,
     pub current_concurrency: usize,
     pub last_success: bool,
     pub last_target: Option<Target>,
+    pub throttled_due_to_fd: bool,
+    pub governor_feedback: GovernorFeedback,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +57,8 @@ pub struct DetectorConfig {
     pub probe: ProbeConfig,
     pub cache: crate::CacheConfig,
     pub max_concurrency: usize,
+    pub governor_enabled: bool,
+    pub governor: ResourceGovernorConfig,
 }
 
 impl Default for DetectorConfig {
@@ -52,6 +67,8 @@ impl Default for DetectorConfig {
             probe: ProbeConfig::default(),
             cache: crate::CacheConfig::default(),
             max_concurrency: 256,
+            governor_enabled: true,
+            governor: ResourceGovernorConfig::default(),
         }
     }
 }
@@ -62,6 +79,8 @@ pub struct Detector {
     ranges: Arc<CloudflareRanges>,
     locations: Arc<dyn LocationSource>,
     pub cfg: DetectorConfig,
+    governor: Option<Arc<ResourceGovernor>>,
+    probe_engine: Arc<ProbeEngine>,
 }
 
 impl Detector {
@@ -77,11 +96,21 @@ impl Detector {
         let cache = crate::FileCache::new(cfg.cache.clone());
         let ranges = Arc::new(CloudflareRanges::load(&client, &cache).await?);
         let locations = Arc::new(LocationStore::load(&client, &cache).await?);
+        let governor = if cfg.governor_enabled {
+            let mut g_cfg = cfg.governor.clone();
+            g_cfg.user_max_concurrency = cfg.max_concurrency.max(1);
+            Some(Arc::new(ResourceGovernor::new(g_cfg, Arc::new(SystemFdCounter))))
+        } else {
+            None
+        };
+        let probe_engine = Arc::new(ProbeEngine::new(cfg.probe.clone()));
         Ok(Self {
             client,
             ranges,
             locations,
             cfg,
+            governor,
+            probe_engine,
         })
     }
 
@@ -91,12 +120,30 @@ impl Detector {
         ranges: CloudflareRanges,
         locations: Arc<dyn LocationSource>,
     ) -> Self {
+        let governor = if cfg.governor_enabled {
+            let mut g_cfg = cfg.governor.clone();
+            g_cfg.user_max_concurrency = cfg.max_concurrency.max(1);
+            Some(Arc::new(ResourceGovernor::new(g_cfg, Arc::new(SystemFdCounter))))
+        } else {
+            None
+        };
+        let probe_engine = Arc::new(ProbeEngine::new(cfg.probe.clone()));
         Self {
             client: Arc::new(client),
             ranges: Arc::new(ranges),
             locations,
             cfg,
+            governor,
+            probe_engine,
         }
+    }
+
+    pub fn governor(&self) -> Option<&ResourceGovernor> {
+        self.governor.as_deref()
+    }
+
+    pub fn probe_engine(&self) -> &ProbeEngine {
+        &self.probe_engine
     }
 
     pub async fn detect(&self, target: &Target, domain: Option<&str>) -> Result<DetectionResult> {
@@ -109,11 +156,9 @@ impl Detector {
                 .push("IP is within official Cloudflare CIDR ranges".into());
         }
 
-        let probe = ProbeEngine::new(self.cfg.probe.clone());
-        let tls = probe
+        let tls = self.probe_engine
             .tls_probe(target, domain)
-            .await
-            .map_err(DetectorError::Network)?;
+            .await?;
         let (protocol, host) = match tls {
             Some(tls) => {
                 result.is_tls = true;
@@ -137,7 +182,7 @@ impl Detector {
                 domain.unwrap_or(&self.cfg.probe.default_sni).to_string(),
             ),
         };
-        let http = probe.http_probe(target, protocol, &host).await?;
+        let http = self.probe_engine.http_probe(target, protocol, &host).await?;
         result.http_status_code = http.status.map(|s| s.as_u16());
         if http.cloudflare_trait {
             result.reasons.push(format!(
@@ -196,30 +241,18 @@ impl Detector {
         is_tls: bool,
         host: &str,
     ) -> Result<Option<EdgeInfo>> {
-        let protocol = if is_tls {
-            Protocol::Https
-        } else {
-            Protocol::Http
-        };
+        let connector = self.probe_engine.connector();
+        let addr = SocketAddr::new(target.ip, target.port);
         let started = std::time::Instant::now();
-        let client = self.cfg.probe.build_client(Some((
-            host,
-            std::net::SocketAddr::new(target.ip, target.port),
-        )))?;
-        let response = client
-            .get(format!(
-                "{}://{}:{}/cdn-cgi/trace",
-                protocol.scheme(),
-                host,
-                target.port
-            ))
-            .header("Host", host)
-            .header("User-Agent", &self.cfg.probe.user_agent)
-            .send()
-            .await?;
-        let body = response.text().await?;
+        let extra = HeaderMap::new();
+        let response = if is_tls {
+            connector.https_get(addr, host, host, "/cdn-cgi/trace", Some(&extra)).await?
+        } else {
+            connector.http_get(addr, host, "/cdn-cgi/trace", Some(&extra)).await?
+        };
         let latency = started.elapsed();
-        let colo = body
+        let body_str = String::from_utf8_lossy(&response.body);
+        let colo = body_str
             .lines()
             .find_map(|line| line.strip_prefix("colo="))
             .map(str::to_string);
@@ -277,16 +310,31 @@ impl Detector {
             return Vec::new();
         }
         let max_limit = self.cfg.max_concurrency.max(1);
-        let current_limit: Arc<Mutex<usize>> = Arc::new(Mutex::new(if adaptive.enabled {
+        let initial_raw = if adaptive.enabled {
             adaptive.initial.clamp(adaptive.min, adaptive.max).min(max_limit)
         } else {
             base_concurrency.clamp(1, max_limit)
-        }));
+        };
+        let initial_limit = if let Some(gov) = self.governor.as_deref() {
+            let (capped, _) = gov.cap_concurrency(initial_raw);
+            capped
+        } else {
+            initial_raw
+        };
+        let current_limit: Arc<Mutex<usize>> = Arc::new(Mutex::new(initial_limit));
+        let last_gov_snap: Arc<Mutex<Option<GovernorSnapshot>>> = Arc::new(Mutex::new(None));
         let sem = Arc::new(Semaphore::new(*current_limit.lock()));
         let recent: Arc<Mutex<VecDeque<bool>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(adaptive.window.max(1))));
         let completed = Arc::new(Mutex::new(0usize));
         let domain_owned: Arc<str> = domain.unwrap_or("").into();
+        let gov_enabled = self.governor.is_some();
+
+        let shared_ranges = self.ranges.clone();
+        let shared_locations = self.locations.clone();
+        let shared_cfg = self.cfg.clone();
+        let shared_governor = self.governor.clone();
+        let shared_probe_engine = self.probe_engine.clone();
 
         let tasks: Vec<_> = targets
             .iter()
@@ -294,16 +342,20 @@ impl Detector {
             .enumerate()
             .map(|(idx, item)| {
                 let target = item.target.clone();
-                let self_clone = unsafe {
-                    std::mem::transmute::<&Detector, &'static Detector>(self)
-                };
+                let bt_id = item.id;
                 let domain_ref = domain_owned.clone();
                 let sem = sem.clone();
                 let completed_c = completed.clone();
                 let recent_c = recent.clone();
                 let adaptive_c = adaptive.clone();
                 let limit_c = current_limit.clone();
+                let gov_snap_c = last_gov_snap.clone();
                 let max_limit_c = max_limit;
+                let ranges = shared_ranges.clone();
+                let locations = shared_locations.clone();
+                let cfg = shared_cfg.clone();
+                let governor = shared_governor.clone();
+                let probe_engine = shared_probe_engine.clone();
                 tokio::spawn(async move {
                     let _permit: OwnedSemaphorePermit = match sem.clone().acquire_owned().await {
                         Ok(p) => p,
@@ -314,12 +366,22 @@ impl Detector {
                                 *c += 1;
                                 p
                             };
-                            return (prev, idx, target, Err(DetectorError::Http("semaphore closed".into())));
+                            return (prev, idx, bt_id, target, Err(DetectorError::Http("semaphore closed".into())));
                         }
                     };
                     let dom = if domain_ref.is_empty() { None } else { Some(domain_ref.as_ref()) };
-                    let result = self_clone.detect(&target, dom).await;
+                    let result = detect_impl(&ranges, &locations, &cfg, &probe_engine, governor.as_deref(), &target, dom).await;
                     let ok = result.is_ok();
+                    if gov_enabled {
+                        if let Err(ref e) = result {
+                            let is_res = classify_resource_error(e);
+                            if let Some(gov) = governor.as_deref() {
+                                gov.record_outcome(is_res);
+                            }
+                        } else if let Some(gov) = governor.as_deref() {
+                            gov.record_outcome(false);
+                        }
+                    }
                     drop(_permit);
                     {
                         let mut r = recent_c.lock();
@@ -334,59 +396,89 @@ impl Detector {
                         *c += 1;
                         p
                     };
-                    if adaptive_c.enabled {
+                    if adaptive_c.enabled || gov_enabled {
                         let r = recent_c.lock();
                         let n = r.len();
-                        if n >= adaptive_c.window.min(3) {
+                        let mut proposed: usize = if adaptive_c.enabled && n >= adaptive_c.window.min(3) {
                             let successes = r.iter().filter(|&&x| x).count();
                             let rate = successes as f64 / n as f64;
-                            let mut limit = limit_c.lock();
-                            let mut new_limit = *limit;
+                            let cur = *limit_c.lock();
+                            let mut new_limit = cur;
                             if rate >= 0.85 {
-                                new_limit = (*limit as f64 * 1.25).ceil() as usize;
+                                new_limit = (cur as f64 * 1.25).ceil() as usize;
                             } else if rate <= 0.35 {
-                                new_limit = (*limit as f64 * 0.5).floor() as usize;
+                                new_limit = (cur as f64 * 0.5).floor() as usize;
                             }
-                            new_limit = new_limit.clamp(adaptive_c.min, adaptive_c.max).min(max_limit_c).max(1);
-                            if new_limit != *limit {
-                                let delta = new_limit as isize - *limit as isize;
-                                if delta > 0 {
-                                    sem.add_permits(delta as usize);
-                                } else {
-                                    for _ in 0..(-delta) {
-                                        if let Ok(p) = sem.clone().try_acquire_owned() {
-                                            p.forget();
-                                        } else {
-                                            break;
-                                        }
+                            let clamp_lo = adaptive_c.min.max(1);
+                            let clamp_hi = adaptive_c.max.min(max_limit_c);
+                            new_limit.clamp(clamp_lo, clamp_hi).max(1)
+                        } else {
+                            *limit_c.lock()
+                        };
+                        if !adaptive_c.enabled {
+                            proposed = proposed.clamp(1, max_limit_c);
+                        }
+                        let (capped, snap) = if let Some(gov) = governor.as_deref() {
+                            gov.cap_concurrency(proposed)
+                        } else {
+                            (proposed.min(max_limit_c).max(1), Default::default())
+                        };
+                        {
+                            let mut gs = gov_snap_c.lock();
+                            *gs = Some(snap);
+                        }
+                        let mut limit = limit_c.lock();
+                        let new_limit = capped.max(1);
+                        if new_limit != *limit {
+                            let delta = new_limit as isize - *limit as isize;
+                            if delta > 0 {
+                                sem.add_permits(delta as usize);
+                            } else {
+                                for _ in 0..(-delta) {
+                                    if let Ok(p) = sem.clone().try_acquire_owned() {
+                                        p.forget();
+                                    } else {
+                                        break;
                                     }
                                 }
-                                *limit = new_limit;
                             }
+                            *limit = new_limit;
                         }
                     }
-                    (prev, idx, target, result)
+                    (prev, idx, bt_id, target, result)
                 })
             })
             .collect();
 
-        let mut out: Vec<(usize, Target, std::result::Result<DetectionResult, DetectorError>)> = Vec::with_capacity(total);
+        let mut out: Vec<(usize, usize, Target, std::result::Result<DetectionResult, DetectorError>)> = Vec::with_capacity(total);
         let mut last_reported = 0usize;
         for task in tasks {
             match task.await {
-                Ok((order, idx, tgt, result)) => {
+                Ok((order, idx, bt_id, tgt, result)) => {
                     let ok = result.is_ok();
-                    out.push((idx, tgt, result));
+                    let tgt_for_progress = tgt.clone();
+                    out.push((idx, bt_id, tgt, result));
                     let done_count = order + 1;
                     if done_count > last_reported || done_count == total {
                         last_reported = done_count;
                         let limit = *current_limit.lock();
+                        let snap_guard = last_gov_snap.lock();
+                        let (throttled, feedback) = if let Some(s) = snap_guard.as_ref() {
+                            (
+                                s.throttled_due_to_fd || s.throttled_due_to_resource_errors,
+                                GovernorFeedback { snapshot: Some(s.clone()) },
+                            )
+                        } else {
+                            (false, GovernorFeedback::default())
+                        };
                         on_progress(BatchProgress {
                             completed: done_count.min(total),
                             total,
                             current_concurrency: limit,
                             last_success: ok,
-                            last_target: None,
+                            last_target: Some(tgt_for_progress),
+                            throttled_due_to_fd: throttled,
+                            governor_feedback: feedback,
                         });
                     }
                 }
@@ -396,15 +488,139 @@ impl Detector {
             }
         }
 
-        out.sort_by_key(|(i, _, _)| *i);
+        out.sort_by_key(|(i, _, _, _)| *i);
         out.into_iter()
-            .map(|(_, target, result)| BatchResult {
+            .map(|(_, bt_id, target, result)| BatchResult {
+                id: bt_id,
                 target,
                 result: result.as_ref().ok().cloned(),
                 error: result.err().map(|e| e.to_string()),
             })
             .collect()
     }
+}
+
+async fn detect_impl(
+    ranges: &Arc<CloudflareRanges>,
+    locations: &Arc<dyn LocationSource>,
+    cfg: &DetectorConfig,
+    probe_engine: &Arc<ProbeEngine>,
+    governor: Option<&ResourceGovernor>,
+    target: &Target,
+    domain: Option<&str>,
+) -> Result<DetectionResult> {
+    let _ = governor;
+    let mut result = DetectionResult::default();
+    let in_range = ranges.contains(target.ip);
+    if in_range {
+        result.is_cloudflare_edge = true;
+        result
+            .reasons
+            .push("IP is within official Cloudflare CIDR ranges".into());
+    }
+
+    let tls = probe_engine
+        .tls_probe(target, domain)
+        .await?;
+    let (protocol, host) = match tls {
+        Some(tls) => {
+            result.is_tls = true;
+            if tls.cloudflare_trait {
+                result
+                    .reasons
+                    .push("TLS/HTTPS probe exhibits Cloudflare traits".into());
+            }
+            (
+                Protocol::Https,
+                if tls.working_sni.is_empty() {
+                    cfg.probe.default_sni.as_str()
+                } else {
+                    tls.working_sni.as_str()
+                }
+                .to_string(),
+            )
+        }
+        None => (
+            Protocol::Http,
+            domain.unwrap_or(&cfg.probe.default_sni).to_string(),
+        ),
+    };
+    let http = probe_engine.http_probe(target, protocol, &host).await?;
+    result.http_status_code = http.status.map(|s| s.as_u16());
+    if http.cloudflare_trait {
+        result.reasons.push(format!(
+            "Service detected on {}",
+            protocol.scheme().to_ascii_uppercase()
+        ));
+        result.reasons.extend(http.reasons);
+    }
+    result.is_usable = http
+        .status
+        .map(|s| s.as_u16() >= 200 && s.as_u16() < 400)
+        .unwrap_or(false);
+
+    let application_traits = usize::from(result.is_usable) + usize::from(http.cloudflare_trait);
+    result.confidence = match (in_range, application_traits) {
+        (true, n) if n > 0 => Confidence::High,
+        (true, _) => Confidence::Medium,
+        (false, n) if n > 0 => {
+            result.is_cloudflare_edge = true;
+            Confidence::Low
+        }
+        _ => Confidence::None,
+    };
+    result.confidence_reason = match result.confidence {
+        Confidence::High => {
+            "IP belongs to Cloudflare and shows application-level traits".into()
+        }
+        Confidence::Medium => {
+            "IP belongs to Cloudflare ranges, but active service traits are limited".into()
+        }
+        Confidence::Low => {
+            "IP is outside official ranges but exhibits Cloudflare application traits".into()
+        }
+        Confidence::None => {
+            "IP is outside Cloudflare ranges and no Cloudflare traits were detected".into()
+        }
+    };
+    if result.is_usable {
+        result.reasons.push(format!(
+            "Successful domain-based response (HTTP {})",
+            result.http_status_code.unwrap_or_default()
+        ));
+    }
+
+    if result.is_cloudflare_edge {
+        let connector = probe_engine.connector();
+        let addr = SocketAddr::new(target.ip, target.port);
+        let started = std::time::Instant::now();
+        let extra = HeaderMap::new();
+        let response = if result.is_tls {
+            connector.https_get(addr, &host, &host, "/cdn-cgi/trace", Some(&extra)).await?
+        } else {
+            connector.http_get(addr, &host, "/cdn-cgi/trace", Some(&extra)).await?
+        };
+        let latency = started.elapsed();
+        let body_str = String::from_utf8_lossy(&response.body);
+        let colo = body_str
+            .lines()
+            .find_map(|line| line.strip_prefix("colo="))
+            .map(str::to_string);
+        if let Some(colo_code) = colo {
+            let mut info = EdgeInfo {
+                colo_code: Some(colo_code.clone()),
+                latency: Some(latency),
+                ..Default::default()
+            };
+            if let Some(loc) = locations.lookup(&colo_code) {
+                info.city = Some(loc.city);
+                info.country = Some(loc.cca2);
+                info.region = Some(loc.region);
+            }
+            result.edge_info = Some(info);
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -438,6 +654,8 @@ mod tests {
             probe: ProbeConfig::default(),
             cache: crate::CacheConfig::default(),
             max_concurrency: 10,
+            governor_enabled: true,
+            governor: crate::governor::ResourceGovernorConfig::default(),
         };
         let cfg2 = cfg.clone();
         assert_eq!(cfg.max_concurrency, cfg2.max_concurrency);

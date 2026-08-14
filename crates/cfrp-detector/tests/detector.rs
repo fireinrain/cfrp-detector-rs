@@ -29,6 +29,8 @@ fn detector_cfg_clone_keeps_values() {
         max_concurrency: 10,
         probe: cfrp_detector::ProbeConfig::default(),
         cache: cfrp_detector::CacheConfig::default(),
+        governor: cfrp_detector::ResourceGovernorConfig::default(),
+        governor_enabled: false,
     };
     let cloned = cfg.clone();
     assert_eq!(cloned.max_concurrency, 10);
@@ -44,10 +46,12 @@ fn with_data_sources_instantiates() {
 fn batch_target_construction_for_detect_batch() {
     let targets: Vec<BatchTarget> = ["1.1.1.1", "1.0.0.1", "8.8.8.8"]
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(i, s)| {
             let ip: Ipv4Addr = s.parse().unwrap();
             BatchTarget {
                 target: Target::new(IpAddr::V4(ip), 443),
+                id: i,
             }
         })
         .collect();

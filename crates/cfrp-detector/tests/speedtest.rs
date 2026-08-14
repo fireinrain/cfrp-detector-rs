@@ -1,7 +1,5 @@
-use cfrp_detector::{SpeedTestConfig, SpeedTestResult, SpeedTester, Target};
-use reqwest::Client;
+use cfrp_detector::{ConnectorConfig, HandshakeType, SpeedTestConfig, SpeedTestResult, SpeedTester, Target};
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::Arc;
 use std::time::Duration;
 
 #[test]
@@ -14,9 +12,8 @@ fn speedtest_config_default() {
 
 #[test]
 fn speedtester_new_from_client() {
-    let client = Client::builder().build().unwrap();
-    let client_arc = Arc::new(client);
-    let st = SpeedTester::new((*client_arc).clone());
+    let cfg = ConnectorConfig::default();
+    let st = SpeedTester::new(cfg, true, "example.com", "example.com").unwrap();
     let _ = st;
 }
 
@@ -26,6 +23,10 @@ fn speedtest_result_bytes_per_sec_is_u64() {
         target: Target::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443),
         bytes_per_second: u64::MAX,
         elapsed: Duration::from_secs(1),
+        connect_latency: None,
+        tls_handshake_latency: None,
+        ttfb_latency: None,
+        handshake_type: Some(HandshakeType::FullHandshake),
     };
     assert_eq!(r.bytes_per_second, u64::MAX);
 }

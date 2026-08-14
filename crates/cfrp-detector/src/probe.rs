@@ -1,11 +1,12 @@
 use crate::{
-    DetectorError, Result,
+    connector::{HandshakeType, PinnedConnector, PinnedHttpResponse},
+    Result,
     model::{Protocol, Target},
 };
-use reqwest::{StatusCode, header::HeaderMap};
+use http::{HeaderMap, StatusCode};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
 
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
@@ -13,6 +14,10 @@ pub struct ProbeConfig {
     pub request_timeout: Duration,
     pub user_agent: String,
     pub default_sni: String,
+    pub tls_session_cache: bool,
+    pub tls_session_cache_size: usize,
+    pub allow_0rtt_speedtest: bool,
+    pub accept_invalid_certs: bool,
 }
 
 impl Default for ProbeConfig {
@@ -22,6 +27,10 @@ impl Default for ProbeConfig {
             request_timeout: Duration::from_secs(3),
             user_agent: "Mozilla/5.0 (compatible; CFRP-Detector/3.0)".into(),
             default_sni: "www.cloudflare.com".into(),
+            tls_session_cache: true,
+            tls_session_cache_size: 256,
+            allow_0rtt_speedtest: false,
+            accept_invalid_certs: true,
         }
     }
 }
@@ -32,14 +41,36 @@ impl ProbeConfig {
         resolve: Option<(&str, SocketAddr)>,
     ) -> std::result::Result<reqwest::Client, reqwest::Error> {
         let mut builder = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_certs(self.accept_invalid_certs)
             .connect_timeout(self.connect_timeout)
             .timeout(self.request_timeout)
             .redirect(reqwest::redirect::Policy::none());
+        if self.accept_invalid_certs {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
         if let Some((host, addr)) = resolve {
             builder = builder.resolve(host, addr);
         }
         builder.build()
+    }
+
+    pub fn to_pinned(&self) -> crate::connector::PinnedClientConfig {
+        crate::connector::PinnedClientConfig {
+            connect_timeout: self.connect_timeout,
+            request_timeout: self.request_timeout,
+            accept_invalid_certs: self.accept_invalid_certs,
+            user_agent: self.user_agent.clone(),
+            tls_session_cache: self.tls_session_cache,
+            tls_session_cache_size: self.tls_session_cache_size,
+            tls_session_cache_max_entries: self.tls_session_cache_size,
+            enable_0rtt: self.allow_0rtt_speedtest,
+            retry: Default::default(),
+        }
+    }
+
+    pub fn build_pinned_connector(&self) -> Result<Arc<PinnedConnector>> {
+        let pc = PinnedConnector::new(self.to_pinned())?;
+        Ok(Arc::new(pc))
     }
 }
 
@@ -49,6 +80,10 @@ pub struct TlsProbe {
     pub cloudflare_trait: bool,
     #[allow(dead_code)]
     pub reason: Option<String>,
+    pub handshake_type: HandshakeType,
+    pub connect_latency: Option<Duration>,
+    pub tls_handshake_latency: Option<Duration>,
+    pub ttfb_latency: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,44 +95,46 @@ pub struct HttpProbe {
 
 pub struct ProbeEngine {
     cfg: ProbeConfig,
+    connector: Arc<PinnedConnector>,
 }
 
 impl ProbeEngine {
     pub fn new(cfg: ProbeConfig) -> Self {
-        Self { cfg }
+        let connector = cfg.build_pinned_connector().unwrap_or_else(|_| {
+            Arc::new(PinnedConnector::new(cfg.to_pinned()).expect("fallback pinned connector build"))
+        });
+        Self { cfg, connector }
+    }
+
+    pub fn connector(&self) -> &Arc<PinnedConnector> {
+        &self.connector
     }
 
     pub async fn tls_probe(
         &self,
         target: &Target,
         domain: Option<&str>,
-    ) -> std::result::Result<Option<TlsProbe>, reqwest::Error> {
+    ) -> Result<Option<TlsProbe>> {
         let candidates = unique_snis(domain, &self.cfg.default_sni);
+        let addr = SocketAddr::new(target.ip, target.port);
         for sni in candidates {
             let host = if sni.is_empty() {
                 self.cfg.default_sni.as_str()
             } else {
                 sni.as_str()
             };
-            let client = self.cfg.build_client(Some((
+            let resp = self.connector.https_get(
+                addr,
                 host,
-                SocketAddr::new(target.ip, target.port),
-            )))?;
-            let url = format!("https://{}:{}/cdn-cgi/trace", host, target.port);
-            let response = timeout(
-                self.cfg.request_timeout,
-                client
-                    .get(&url)
-                    .header("Host", host)
-                    .header("User-Agent", &self.cfg.user_agent)
-                    .send(),
-            )
-            .await;
-            match response {
-                Ok(Ok(resp)) if resp.status().is_success() || resp.status().is_redirection() => {
+                host,
+                "/cdn-cgi/trace",
+                None,
+            ).await;
+            match resp {
+                Ok(r) if r.status.is_success() || r.status.is_redirection() => {
                     let mut trait_found = false;
-                    let server = resp
-                        .headers()
+                    let server = r
+                        .headers
                         .get("server")
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or_default();
@@ -108,6 +145,10 @@ impl ProbeEngine {
                         working_sni: sni,
                         cloudflare_trait: trait_found,
                         reason: Some("HTTPS endpoint responded".into()),
+                        handshake_type: r.handshake_type,
+                        connect_latency: r.timing.connect_latency,
+                        tls_handshake_latency: r.timing.tls_handshake_latency,
+                        ttfb_latency: r.timing.ttfb_latency,
                     }));
                 }
                 _ => continue,
@@ -122,20 +163,16 @@ impl ProbeEngine {
         protocol: Protocol,
         host: &str,
     ) -> Result<HttpProbe> {
-        let client = self.cfg.build_client(Some((
-            host,
-            SocketAddr::new(target.ip, target.port),
-        )))?;
-        let url = format!("{}://{}:{}/", protocol.scheme(), host, target.port);
-        let req = client
-            .get(url)
-            .header("Host", host)
-            .header("User-Agent", &self.cfg.user_agent);
-        let resp = timeout(self.cfg.request_timeout, req.send())
-            .await
-            .map_err(|_| DetectorError::Http("probe request timed out".into()))??;
-        let headers = resp.headers();
-        Ok(analyze_headers(resp.status(), headers))
+        let addr = SocketAddr::new(target.ip, target.port);
+        let resp: PinnedHttpResponse = match protocol {
+            Protocol::Https => {
+                self.connector.https_get(addr, host, host, "/", None).await?
+            }
+            Protocol::Http => {
+                self.connector.http_get(addr, host, "/", None).await?
+            }
+        };
+        Ok(analyze_headers(resp.status, &resp.headers))
     }
 }
 
@@ -296,6 +333,10 @@ mod tests {
             working_sni: "test.com".into(),
             cloudflare_trait: true,
             reason: Some("ok".into()),
+            handshake_type: HandshakeType::FullHandshake,
+            connect_latency: None,
+            tls_handshake_latency: None,
+            ttfb_latency: None,
         };
         assert_eq!(probe.working_sni, "test.com");
         assert!(probe.cloudflare_trait);

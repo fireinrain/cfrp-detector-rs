@@ -12,6 +12,7 @@ use std::{
     net::IpAddr,
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -144,6 +145,43 @@ struct Cli {
     )]
     probe_timeout_secs: u64,
 
+    #[arg(
+        long = "bench",
+        help = "Run an in-process micro-benchmark suite (governor + connector baseline) and print a Go-compatible JSON report to stdout"
+    )]
+    bench: bool,
+
+    #[arg(
+        long = "bench-quick",
+        help = "Same as --bench but with smaller sample sizes (for CI smoke test)"
+    )]
+    bench_quick: bool,
+
+    #[arg(
+        long = "governor-report",
+        help = "Print final FD/governor snapshot on stderr after batch detection completes"
+    )]
+    governor_report: bool,
+
+    #[arg(
+        long = "no-governor",
+        help = "Disable the FD/resource-aware concurrency governor (run with original cap only)"
+    )]
+    no_governor: bool,
+
+    #[arg(
+        long = "tls-session-cache",
+        default_value_t = 256,
+        help = "Maximum TLS session cache entries (for session resumption across connections)"
+    )]
+    tls_session_cache: usize,
+
+    #[arg(
+        long = "speedtest-0rtt",
+        help = "Enable TLS 0-RTT early data in the speed-test (requires TLS session cache warmup on the same endpoint first)"
+    )]
+    speedtest_0rtt: bool,
+
     #[arg(value_name = "TARGET", help = "Targets in form ip[:port] or [ipv6]:port")]
     targets: Vec<String>,
 }
@@ -245,6 +283,202 @@ fn bool_yn(v: bool) -> &'static str {
     if v { "Y" } else { "N" }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct InProcessBaselineResult {
+    name: String,
+    avg_ns: u128,
+    min_ns: u128,
+    max_ns: u128,
+    ops_per_sec: f64,
+    #[serde(default)]
+    throughput_bps: Option<u64>,
+    #[serde(default)]
+    extra: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct InProcessBaselineSuite {
+    results: Vec<InProcessBaselineResult>,
+    generated_at: Option<String>,
+    rust_version: Option<String>,
+    os: Option<String>,
+    arch: Option<String>,
+}
+
+fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
+    use cfrp_detector::governor::{
+        classify_resource_error, MockFdCounter, ResourceGovernor, ResourceGovernorConfig,
+    };
+    use cfrp_detector::{ConnectorConfig, DetectorConfig, PinnedConnector, ProbeConfig};
+    use std::time::{Instant, SystemTime};
+
+    let iterations = if quick { 2_000 } else { 50_000 };
+    let warmup = if quick { 50 } else { 500 };
+
+    fn bench_one<F: FnMut() -> ()>(mut f: F, iters: usize, warmup: usize) -> (u128, u128, u128) {
+        for _ in 0..warmup {
+            f();
+        }
+        let mut min = u128::MAX;
+        let mut max = u128::MIN;
+        let total_start = Instant::now();
+        for _ in 0..iters {
+            let s = Instant::now();
+            f();
+            let d = s.elapsed().as_nanos();
+            if d < min { min = d; }
+            if d > max { max = d; }
+        }
+        let total_ns = total_start.elapsed().as_nanos();
+        let avg = total_ns / iters.max(1) as u128;
+        (avg, min, max)
+    }
+
+    let mut results: Vec<InProcessBaselineResult> = Vec::new();
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| format!("unixtime={}", d.as_secs()))
+        .ok();
+
+    // Scenario 1: Governor cap_concurrency (baseline: Go sync.Mutex + ring)
+    {
+        let cfg = ResourceGovernorConfig::default();
+        let mock = MockFdCounter::new(400, 1024);
+        let gov = ResourceGovernor::new(cfg, mock);
+        for _ in 0..5_000 {
+            gov.record_outcome(false);
+        }
+        let (avg, min, max) = bench_one(
+            || {
+                let (capped, _snap) = gov.cap_concurrency(64);
+                std::hint::black_box(capped);
+            },
+            iterations,
+            warmup,
+        );
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("go_baseline_hint_ns".into(), "2500".into());
+        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/governor".into());
+        results.push(InProcessBaselineResult {
+            name: "governor.cap_concurrency".into(),
+            avg_ns: avg,
+            min_ns: min,
+            max_ns: max,
+            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            extra,
+            ..Default::default()
+        });
+    }
+
+    // Scenario 2: classify_resource_error (Go strings.Contains + switch)
+    {
+        let io_emfile = std::io::Error::from_raw_os_error(24);
+        let e = cfrp_detector::DetectorError::Io(io_emfile);
+        let (avg, min, max) = bench_one(
+            || {
+                let b = classify_resource_error(&e);
+                std::hint::black_box(b);
+            },
+            iterations,
+            warmup,
+        );
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("go_baseline_hint_ns".into(), "180".into());
+        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/governor".into());
+        results.push(InProcessBaselineResult {
+            name: "governor.classify_resource_error_EMFILE".into(),
+            avg_ns: avg,
+            min_ns: min,
+            max_ns: max,
+            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            extra,
+            ..Default::default()
+        });
+    }
+
+    // Scenario 3: PinnedConnector::new default (Go tls.Config + x509.VerifyOptions)
+    {
+        let (avg, min, max) = bench_one(
+            || {
+                let c = PinnedConnector::new(ConnectorConfig::default()).unwrap();
+                std::hint::black_box(c.tls_session_cache_len());
+            },
+            iterations / 50,
+            warmup / 5,
+        );
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("go_baseline_hint_ns".into(), "450000".into());
+        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/connector".into());
+        results.push(InProcessBaselineResult {
+            name: "connector.PinnedConnector_new_default".into(),
+            avg_ns: avg,
+            min_ns: min,
+            max_ns: max,
+            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            extra,
+            ..Default::default()
+        });
+    }
+
+    // Scenario 4: ProbeConfig -> PinnedClientConfig conversion
+    {
+        let p = ProbeConfig::default();
+        let (avg, min, max) = bench_one(
+            || {
+                let pinned = p.to_pinned();
+                std::hint::black_box(pinned);
+            },
+            iterations,
+            warmup,
+        );
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("go_baseline_hint_ns".into(), "80".into());
+        extra.insert("baseline_component".into(), "go-cfrp-detector/internal/config".into());
+        results.push(InProcessBaselineResult {
+            name: "probe.ProbeConfig_to_pinned".into(),
+            avg_ns: avg,
+            min_ns: min,
+            max_ns: max,
+            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            extra,
+            ..Default::default()
+        });
+    }
+
+    // Scenario 5: DetectorConfig default clone (vs Go struct copy + slices)
+    {
+        let d = DetectorConfig::default();
+        let (avg, min, max) = bench_one(
+            || {
+                let cloned = d.clone();
+                std::hint::black_box(cloned.max_concurrency);
+            },
+            iterations,
+            warmup,
+        );
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("go_baseline_hint_ns".into(), "40".into());
+        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/detector".into());
+        results.push(InProcessBaselineResult {
+            name: "detector.DetectorConfig_default_clone".into(),
+            avg_ns: avg,
+            min_ns: min,
+            max_ns: max,
+            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            extra,
+            ..Default::default()
+        });
+    }
+
+    InProcessBaselineSuite {
+        results,
+        generated_at: now,
+        rust_version: Some(option_env!("RUSTC_VERSION").map(|v| format!("rustc {}", v)).unwrap_or_else(|| "rustc unknown".into())),
+        os: Some(std::env::consts::OS.into()),
+        arch: Some(std::env::consts::ARCH.into()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -253,6 +487,39 @@ async fn main() -> Result<()> {
         .compact()
         .init();
     let cli = Cli::parse();
+
+    if cli.bench || cli.bench_quick {
+        let report = run_in_process_bench(cli.bench_quick);
+        match cli.format.unwrap_or(OutputFormat::Json) {
+            OutputFormat::Json => {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+            OutputFormat::Csv | OutputFormat::Txt => {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                writeln!(
+                    out,
+                    "{:<45} {:>18} {:>18} {:>10}",
+                    "SCENARIO", "AVG_NS", "GO_HINT_NS", "RATIO"
+                )?;
+                for r in &report.results {
+                    let go_hint = r.extra.get("go_baseline_hint_ns").and_then(|s| s.parse::<u128>().ok()).unwrap_or_default();
+                    let ratio = if r.avg_ns > 0 && go_hint > 0 {
+                        format!("{:.2}x", go_hint as f64 / r.avg_ns as f64)
+                    } else {
+                        String::from("n/a")
+                    };
+                    writeln!(
+                        out,
+                        "{:<45} {:>18} {:>18} {:>10}",
+                        r.name, r.avg_ns, go_hint, ratio
+                    )?;
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let targets = collect_targets(&cli)?;
     if targets.is_empty() {
         anyhow::bail!("no targets supplied; pass positional TARGET or use -i FILE");
@@ -267,6 +534,7 @@ async fn main() -> Result<()> {
             .await
             .context("one-shot detection failed")?;
         let br = cfrp_detector::BatchResult {
+            id: 0,
             target: t.clone(),
             result: Some(result),
             error: None,
@@ -277,13 +545,19 @@ async fn main() -> Result<()> {
 
     let mut cfg = DetectorConfig::default();
     cfg.probe.request_timeout = Duration::from_secs(cli.probe_timeout_secs);
+    cfg.probe.tls_session_cache_size = cli.tls_session_cache;
+    cfg.probe.allow_0rtt_speedtest = cli.speedtest_0rtt;
+    cfg.governor_enabled = !cli.no_governor;
+    cfg.governor.user_max_concurrency = cfg.max_concurrency.max(1);
+    cfg.governor.fd_safety_headroom = (cli.tls_session_cache / 8).max(32);
     let connect_timeout = cfg.probe.connect_timeout;
     let detector = Detector::new(cfg).await.context("initialize detector")?;
 
     let batch: Vec<BatchTarget> = targets
         .iter()
         .cloned()
-        .map(|target| BatchTarget { target })
+        .enumerate()
+        .map(|(id, target)| BatchTarget { target, id })
         .collect();
 
     let pb: Option<ProgressBar> = if cli.progress {
@@ -366,27 +640,29 @@ async fn main() -> Result<()> {
         let mut map = std::collections::HashMap::new();
         use futures::{StreamExt, stream};
         let host_owned = host.to_string();
+        let session_cache = cli.tls_session_cache.max(128);
+        let enable_0rtt = cli.speedtest_0rtt;
+        let mut conn_cfg = cfrp_detector::ConnectorConfig::default();
+        conn_cfg.connect_timeout = connect_timeout;
+        conn_cfg.request_timeout = speed_cfg.timeout;
+        conn_cfg.tls_session_cache_max_entries = session_cache;
+        conn_cfg.tls_session_cache_size = session_cache;
+        conn_cfg.enable_0rtt = enable_0rtt;
+        let conn = Arc::new(cfrp_detector::PinnedConnector::new(conn_cfg).context("build pinned connector for speedtest")?);
         let stream = stream::iter(speed_targets.into_iter().enumerate())
             .map(|(i, target)| {
-                let url = format!(
-                    "https://{}:{}{}",
-                    host_owned, target.port, cli.speedtest_url_path
-                );
-                let addr = std::net::SocketAddr::new(target.ip, target.port);
                 let cfg_inner = speed_cfg.clone();
                 let pb_opt = pb.clone();
-                let host_for_resolve = host_owned.clone();
+                let conn_c = conn.clone();
+                let sni_c = host_owned.clone();
+                let path_c = cli.speedtest_url_path.clone();
                 async move {
-                    let resolved_client = reqwest::Client::builder()
-                        .danger_accept_invalid_certs(true)
-                        .connect_timeout(connect_timeout)
-                        .timeout(cfg_inner.timeout)
-                        .redirect(reqwest::redirect::Policy::none())
-                        .resolve(&host_for_resolve, addr)
-                        .build()
-                        .ok()?;
-                    let tester = SpeedTester::new(resolved_client);
-                    let res = tester.test(&target, &url, &cfg_inner).await.ok();
+                    let use_tls = target.port != 80;
+                    let tester = SpeedTester::with_connector(conn_c, use_tls, sni_c.clone(), sni_c.clone());
+                    if enable_0rtt {
+                        tester.set_0rtt_enabled(true);
+                    }
+                    let res = tester.test_with_warmup(&target, &path_c, &cfg_inner).await.ok();
                     if let Some(pb) = pb_opt {
                         pb.inc(1);
                     }
@@ -398,16 +674,41 @@ async fn main() -> Result<()> {
             })
             .buffer_unordered(speed_cfg.concurrency.max(1));
         let outcomes: Vec<_> = stream.collect().await;
+        let total_targets = outcomes.len();
         for (t, bps) in outcomes.into_iter().flatten() {
             map.insert(t.to_string(), bps);
         }
         if let Some(bar) = pb.as_ref() {
             bar.finish_with_message("speedtest done");
         }
+        if cli.governor_report {
+            eprintln!(
+                "[speedtest] session_cache_len={} 0rtt_enabled={} targets_tested={}",
+                conn.tls_session_cache_len(),
+                enable_0rtt,
+                total_targets
+            );
+        }
         map
     } else {
         std::collections::HashMap::new()
     };
+
+    if cli.governor_report {
+        if let Some(gov) = detector.governor() {
+            let (_, snap) = gov.cap_concurrency(1);
+            eprintln!(
+                "[governor] active={} fd_used={}/{} fd_budget={} fd_ratio={:.3} errors={}/{} cap_proposed→{} err_ratio={:.3} throttled_fd={} throttled_err={}",
+                snap.active, snap.fd_used, snap.fd_limit, snap.fd_budget, snap.fd_ratio,
+                snap.resource_errors, snap.resource_error_ratio,
+                snap.capped_concurrency,
+                snap.resource_error_ratio,
+                snap.throttled_due_to_fd, snap.throttled_due_to_resource_errors,
+            );
+        } else {
+            eprintln!("[governor] governor_disabled_by_cli=true");
+        }
+    }
 
     let mut records: Vec<ExportRecord> = Vec::with_capacity(results.len());
     for br in &results {
