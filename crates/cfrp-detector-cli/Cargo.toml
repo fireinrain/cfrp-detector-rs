@@ -1,0 +1,21 @@
+[package]
+name = "cfrp-detector-cli"
+version = "0.1.0"
+description = "Command line interface for cfrp-detector"
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cfrp-detector"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cfrp-detector = { path = "../cfrp-detector" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
