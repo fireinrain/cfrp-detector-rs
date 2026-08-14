@@ -22,7 +22,7 @@ fn phase3_1_pinned_connector_has_http_and_https_download() {
     assert_eq!(conn.config.tls_session_cache_size, 256);
     assert_eq!(conn.config.tls_session_cache_max_entries, 256);
     assert!(!conn.config.enable_0rtt);
-    assert!(matches!(conn.config.enable_0rtt, false));
+    assert!(!conn.config.enable_0rtt);
 }
 
 #[test]
@@ -345,8 +345,8 @@ fn phase3_1_connector_config_default_values_are_phase3_spec() {
         "PinnedConnector must accept pinned-invalid certs for endpoint pinning"
     );
     assert!(cfg.tls_session_cache, "session cache enabled by default");
-    assert_eq!(
-        cfg.enable_0rtt, false,
+    assert!(
+        !cfg.enable_0rtt,
         "0rtt disabled by default (opt-in via allow_0rtt_speedtest)"
     );
     assert!(cfg.connect_timeout.as_millis() > 0);
@@ -411,7 +411,7 @@ fn phase3_1_pinned_client_config_to_pinned_keeps_values() {
     assert_eq!(conn.config.user_agent, cfg.user_agent);
     assert_eq!(conn.config.tls_session_cache_size, 7);
     assert_eq!(conn.config.tls_session_cache_max_entries, 11);
-    assert_eq!(conn.config.enable_0rtt, true);
+    assert!(conn.config.enable_0rtt);
 }
 
 // ---- Phase 3.2 Session Resumption + 0-RTT SpeedTest behavior contracts ----

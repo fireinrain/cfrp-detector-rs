@@ -235,11 +235,10 @@ impl Detector {
             ));
         }
 
-        if result.is_cloudflare_edge {
-            if let Some(edge) = self.fetch_edge_info(target, result.is_tls, &host).await? {
+        if result.is_cloudflare_edge
+            && let Some(edge) = self.fetch_edge_info(target, result.is_tls, &host).await? {
                 result.edge_info = Some(edge);
             }
-        }
         Ok(result)
     }
 
@@ -1046,9 +1045,9 @@ mod tests {
         let reason = match Confidence::Medium {
             Confidence::High => "",
             Confidence::Medium => {
-                "IP belongs to Cloudflare ranges, but active service traits are limited".into()
+                "IP belongs to Cloudflare ranges, but active service traits are limited"
             }
-            _ => "".into(),
+            _ => "",
         };
         assert!(reason.contains("ranges, but active service traits are limited"));
     }
@@ -1090,7 +1089,7 @@ mod tests {
     #[test]
     fn confidence_ordering_is_not_relied_on_but_variants_exist() {
         use Confidence::*;
-        let all = vec![None, Low, Medium, High];
+        let all = [None, Low, Medium, High];
         assert_eq!(all.len(), 4);
     }
 

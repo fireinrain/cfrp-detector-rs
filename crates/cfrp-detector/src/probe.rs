@@ -190,12 +190,11 @@ fn unique_snis(domain: Option<&str>, default: &str) -> Vec<String> {
 fn analyze_headers(status: StatusCode, headers: &HeaderMap) -> HttpProbe {
     let mut reasons = Vec::new();
     let mut trait_found = false;
-    if let Some(server) = headers.get("server").and_then(|x| x.to_str().ok()) {
-        if server.to_ascii_lowercase().contains("cloudflare") {
+    if let Some(server) = headers.get("server").and_then(|x| x.to_str().ok())
+        && server.to_ascii_lowercase().contains("cloudflare") {
             reasons.push("HTTP Server header contains 'cloudflare'".into());
             trait_found = true;
         }
-    }
     if headers.contains_key("cf-ray") {
         reasons.push("HTTP response has CF-RAY header".into());
         trait_found = true;

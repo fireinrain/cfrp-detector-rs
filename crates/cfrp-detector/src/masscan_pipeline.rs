@@ -171,7 +171,7 @@ impl MasscanPipeline {
         conn_cfg.tls_session_cache_size = session_cache;
         let conn = Arc::new(crate::PinnedConnector::new(conn_cfg)?);
         use futures::stream::{self, StreamExt};
-        let stream = stream::iter(speed_targets.into_iter())
+        let stream = stream::iter(speed_targets)
             .map(|target| {
                 let cfg_inner = speed_cfg.clone();
                 let conn_c = conn.clone();
@@ -200,11 +200,10 @@ impl MasscanPipeline {
         results: &[BatchResult],
         speed: &std::collections::HashMap<String, u64>,
     ) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
             }
-        }
         let mut wtr = CsvWriter::from_path(path)?;
         for br in results {
             let speed_bps = speed.get(&br.target.to_string()).copied();

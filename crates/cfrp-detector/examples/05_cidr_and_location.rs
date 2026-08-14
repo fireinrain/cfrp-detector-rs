@@ -75,7 +75,7 @@ fn main() -> anyhow::Result<()> {
         ),
     ];
 
-    println!("{:<50} {:<8} {}", "IP", "CF?", "NOTES");
+    println!("{:<50} {:<8} NOTES", "IP", "CF?");
     println!("{}", "-".repeat(90));
     let mut hit = 0usize;
     for (ip, expected, note) in &ip_cases {
@@ -116,8 +116,8 @@ fn main() -> anyhow::Result<()> {
     ];
 
     println!(
-        "{:<8} {:<20} {:<16} {:<18} {}",
-        "CODE", "CITY", "REGION", "COUNTRY", "NOTES"
+        "{:<8} {:<20} {:<16} {:<18} NOTES",
+        "CODE", "CITY", "REGION", "COUNTRY"
     );
     println!("{}", "-".repeat(100));
     let mut found = 0usize;

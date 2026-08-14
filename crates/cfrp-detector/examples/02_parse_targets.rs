@@ -23,7 +23,7 @@ fn main() {
         ("[::1]", 443, "IPv6 方括号无端口 → 默认端口"),
     ];
 
-    println!("{:<40} {:<6} {:<10} {}", "INPUT", "DEF", "RESULT", "NOTES");
+    println!("{:<40} {:<6} {:<10} NOTES", "INPUT", "DEF", "RESULT");
     println!("{}", "-".repeat(100));
 
     let mut pass = 0usize;

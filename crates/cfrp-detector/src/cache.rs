@@ -143,11 +143,10 @@ impl FileCache {
                 latest = Some((entry.path(), modified));
             }
         }
-        if let Some((path, modified)) = latest {
-            if modified.elapsed().unwrap_or(Duration::MAX) <= max_age {
+        if let Some((path, modified)) = latest
+            && modified.elapsed().unwrap_or(Duration::MAX) <= max_age {
                 return Ok(Some(path));
             }
-        }
         Ok(None)
     }
 

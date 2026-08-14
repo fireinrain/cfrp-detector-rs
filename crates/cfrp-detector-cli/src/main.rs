@@ -597,7 +597,7 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
     let iterations = if quick { 2_000 } else { 50_000 };
     let warmup = if quick { 50 } else { 500 };
 
-    fn bench_one<F: FnMut() -> ()>(mut f: F, iters: usize, warmup: usize) -> (u128, u128, u128) {
+    fn bench_one<F: FnMut()>(mut f: F, iters: usize, warmup: usize) -> (u128, u128, u128) {
         for _ in 0..warmup {
             f();
         }
@@ -962,7 +962,7 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
                 asn_dir.display(),
                 setting.display()
             );
-            return Ok(true);
+            Ok(true)
         }
         MasscanCmd::SingleAsn { asn, tls, port } => {
             let tls = tls.unwrap_or(true);
@@ -985,7 +985,7 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
                 out.output_path.display(),
                 started.elapsed().as_secs()
             );
-            return Ok(true);
+            Ok(true)
         }
         MasscanCmd::BatchAsn { filename } => {
             let tasks_raw = MasscanScanner::read_asn_task_file(filename)?;
@@ -1015,7 +1015,7 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
                 result.outputs.len(),
                 started.elapsed().as_secs()
             );
-            return Ok(true);
+            Ok(true)
         }
         MasscanCmd::SingleIp { ip, tls, port } => {
             let target_ip = ip.unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(172, 67, 73, 54)));
@@ -1039,7 +1039,7 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
                 out.output_path.display(),
                 started.elapsed().as_secs()
             );
-            return Ok(true);
+            Ok(true)
         }
         MasscanCmd::BatchIp {
             filename,
@@ -1070,7 +1070,7 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
                 out.output_path.display(),
                 started.elapsed().as_secs()
             );
-            return Ok(true);
+            Ok(true)
         }
     }
 }
@@ -1446,15 +1446,14 @@ fn infer_format(cfg: &ConfigFile) -> OutputFormat {
     if let Some(f) = cfg.format {
         return f;
     }
-    if let Some(p) = cfg.output.as_ref() {
-        if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
+    if let Some(p) = cfg.output.as_ref()
+        && let Some(ext) = p.extension().and_then(|x| x.to_str()) {
             match ext.to_ascii_lowercase().as_str() {
                 "txt" | "text" => return OutputFormat::Txt,
                 "csv" => return OutputFormat::Csv,
                 _ => {}
             }
         }
-    }
     OutputFormat::Json
 }
 
@@ -1781,7 +1780,7 @@ mod tests {
 
     #[test]
     fn build_pipeline_options_inherits_detection_flags() {
-        let cli = Cli::try_parse_from(&[
+        let cli = Cli::try_parse_from([
             "cfrp-detector",
             "--output-dir",
             "/tmp/outs",

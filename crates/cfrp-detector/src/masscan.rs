@@ -7,18 +7,15 @@ use std::{
 };
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ScanMode {
+    #[default]
     SingleAsn,
     BatchAsn,
     SingleIp,
     BatchIp,
 }
 
-impl Default for ScanMode {
-    fn default() -> Self {
-        ScanMode::SingleAsn
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsnTask {
@@ -94,11 +91,10 @@ impl MasscanScanner {
     }
 
     pub fn resolve_masscan_cmd(&self) -> PathBuf {
-        if let Some(p) = self.cfg.masscan_binary_path.as_ref() {
-            if p.exists() {
+        if let Some(p) = self.cfg.masscan_binary_path.as_ref()
+            && p.exists() {
                 return p.clone();
             }
-        }
         let local = PathBuf::from("./masscan");
         if local.exists() {
             return local;
@@ -109,11 +105,11 @@ impl MasscanScanner {
     pub fn check_masscan_available(&self) -> Result<PathBuf> {
         let cmd = self.resolve_masscan_cmd();
         let is_local =
-            cmd.is_relative() || cmd.parent().is_some() && cmd != PathBuf::from("masscan");
+            cmd.is_relative() || cmd.parent().is_some() && cmd != *"masscan";
         if is_local && cmd.exists() {
             return Ok(cmd);
         }
-        if cmd == PathBuf::from("masscan") {
+        if cmd == *"masscan" {
             let output = Command::new(&cmd)
                 .arg("--version")
                 .stdout(Stdio::null())
@@ -152,8 +148,8 @@ impl MasscanScanner {
     #[cfg(not(target_os = "linux"))]
     pub fn list_interfaces() -> Result<Vec<NetworkInterface>> {
         use std::net::UdpSocket;
-        let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| DetectorError::Io(e))?;
-        let local_addr = socket.local_addr().map_err(|e| DetectorError::Io(e))?;
+        let socket = UdpSocket::bind("0.0.0.0:0").map_err(DetectorError::Io)?;
+        let local_addr = socket.local_addr().map_err(DetectorError::Io)?;
         let ip = local_addr.ip();
         let _ = ip;
         Ok(vec![NetworkInterface {
@@ -165,14 +161,13 @@ impl MasscanScanner {
         if let Some(iface) = self.cfg.interface.as_ref() {
             return Ok(iface.clone());
         }
-        if self.cfg.iface_setting_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(&self.cfg.iface_setting_file) {
+        if self.cfg.iface_setting_file.exists()
+            && let Ok(content) = std::fs::read_to_string(&self.cfg.iface_setting_file) {
                 let trimmed = content.trim().to_string();
                 if !trimmed.is_empty() {
                     return Ok(trimmed);
                 }
             }
-        }
         let ifaces = Self::list_interfaces()?;
         match ifaces.len() {
             0 => Err(DetectorError::DataSource(
@@ -188,11 +183,10 @@ impl MasscanScanner {
     }
 
     pub fn save_interface_setting(&self, name: &str) -> Result<()> {
-        if let Some(parent) = self.cfg.iface_setting_file.parent() {
-            if !parent.as_os_str().is_empty() {
+        if let Some(parent) = self.cfg.iface_setting_file.parent()
+            && !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
             }
-        }
         std::fs::write(&self.cfg.iface_setting_file, name)?;
         Ok(())
     }
@@ -213,13 +207,13 @@ impl MasscanScanner {
         let client = reqwest::Client::builder()
             .user_agent(self.cfg.user_agent.as_str())
             .build()
-            .map_err(|e| DetectorError::Network(e))?;
+            .map_err(DetectorError::Network)?;
         let resp = client
             .get(&url)
             .send()
             .await
-            .map_err(|e| DetectorError::Network(e))?;
-        let html = resp.text().await.map_err(|e| DetectorError::Network(e))?;
+            .map_err(DetectorError::Network)?;
+        let html = resp.text().await.map_err(DetectorError::Network)?;
         let cidrs = parse_ipip_asn_html(&html, asn);
         let content = cidrs.join("\n");
         std::fs::write(&cache_file, content)?;
@@ -230,7 +224,7 @@ impl MasscanScanner {
         if cidrs.is_empty() {
             return Ok(Vec::new());
         }
-        let tmp_ipl = tempfile::NamedTempFile::new().map_err(|e| DetectorError::Io(e))?;
+        let tmp_ipl = tempfile::NamedTempFile::new().map_err(DetectorError::Io)?;
         let ipl_path = tmp_ipl.path().to_path_buf();
         let data = cidrs.join("\n");
         std::fs::write(&ipl_path, data)?;
@@ -244,7 +238,7 @@ impl MasscanScanner {
         if ips.is_empty() {
             return Ok(Vec::new());
         }
-        let tmp_ipl = tempfile::NamedTempFile::new().map_err(|e| DetectorError::Io(e))?;
+        let tmp_ipl = tempfile::NamedTempFile::new().map_err(DetectorError::Io)?;
         let ipl_path = tmp_ipl.path().to_path_buf();
         let data: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
         std::fs::write(&ipl_path, data.join("\n"))?;
@@ -269,7 +263,7 @@ impl MasscanScanner {
     ) -> Result<PathBuf> {
         let binary = self.check_masscan_available()?;
         let iface = self.resolve_interface()?;
-        let output = tempfile::NamedTempFile::new().map_err(|e| DetectorError::Io(e))?;
+        let output = tempfile::NamedTempFile::new().map_err(DetectorError::Io)?;
         let output_path = output.into_temp_path();
         let persist_path = output_path.keep().map_err(|e| DetectorError::Io(e.error))?;
 
@@ -290,7 +284,7 @@ impl MasscanScanner {
             .arg(&iface)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
-        let status = cmd.status().map_err(|e| DetectorError::Io(e))?;
+        let status = cmd.status().map_err(DetectorError::Io)?;
         if !status.success() {
             let _ = std::fs::remove_file(&persist_path);
             return Err(DetectorError::Http(format!(
@@ -302,7 +296,7 @@ impl MasscanScanner {
     }
 
     pub fn read_ip_list_file(path: &Path) -> Result<Vec<IpAddr>> {
-        let content = std::fs::read_to_string(path).map_err(|e| DetectorError::Io(e))?;
+        let content = std::fs::read_to_string(path).map_err(DetectorError::Io)?;
         let mut out = Vec::new();
         for line in content.lines() {
             let trimmed = line.split('#').next().unwrap_or("").trim();
@@ -318,7 +312,7 @@ impl MasscanScanner {
     }
 
     pub fn read_asn_task_file(path: &Path) -> Result<Vec<AsnTask>> {
-        let content = std::fs::read_to_string(path).map_err(|e| DetectorError::Io(e))?;
+        let content = std::fs::read_to_string(path).map_err(DetectorError::Io)?;
         let mut out = Vec::new();
         for (i, line) in content.lines().enumerate() {
             let trimmed = line.split('#').next().unwrap_or("").trim();
@@ -349,11 +343,10 @@ fn parse_ipip_asn_html(html: &str, asn: u32) -> Vec<String> {
                         .chars()
                         .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '/' || *c == ':')
                         .collect();
-                    if !cidr_candidate.contains(':') && cidr_candidate.contains('/') {
-                        if seen.insert(cidr_candidate.clone()) {
+                    if !cidr_candidate.contains(':') && cidr_candidate.contains('/')
+                        && seen.insert(cidr_candidate.clone()) {
                             out.push(cidr_candidate);
                         }
-                    }
                 }
             }
         }
@@ -413,12 +406,11 @@ fn regex_fallback(line: &str) -> Vec<String> {
             }
             if pfx_start < i {
                 let prefix = &line[pfx_start..i];
-                if let Ok(p) = prefix.parse::<u8>() {
-                    if p <= 32 {
+                if let Ok(p) = prefix.parse::<u8>()
+                    && p <= 32 {
                         out.push(format!("{}/{}", ip_part, p));
                         continue;
                     }
-                }
             }
         }
     }
@@ -667,7 +659,7 @@ open tcp 8443 104.17.200.10 1710000001
         let setting = dir.path().join("setting.txt");
         let ip_list = dir.path().join("ip.txt");
         std::fs::create_dir_all(&asn_dir).unwrap();
-        std::fs::write(&asn_dir.join("45102"), "x").unwrap();
+        std::fs::write(asn_dir.join("45102"), "x").unwrap();
         std::fs::write(&setting, "eth0").unwrap();
         std::fs::write(&ip_list, "temp").unwrap();
         clear_cache(&asn_dir, &setting).unwrap();

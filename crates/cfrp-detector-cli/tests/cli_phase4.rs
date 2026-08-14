@@ -36,7 +36,7 @@ tls_session_cache = 1024
     let figment = figment::Figment::from(figment::providers::Toml::file(&file_path));
     let cfg: CfgShim = figment.extract().expect("toml parse");
     assert_eq!(cfg.concurrency, 42);
-    assert_eq!(cfg.progress, true);
+    assert!(cfg.progress);
     assert_eq!(cfg.probe_timeout_secs, 9);
     assert_eq!(cfg.tls_session_cache, 1024);
 
@@ -50,10 +50,7 @@ fn phase4_4_env_var_cfrp_concurrency_applied() {
         figment::Figment::new().merge(figment::providers::Env::prefixed("CFRP_").split("_"));
     let v: Result<usize, _> = figment.extract_inner("concurrency");
     unsafe { std::env::remove_var("CFRP_CONCURRENCY") };
-    match v {
-        Ok(n) => assert_eq!(n, 777),
-        Err(_) => {}
-    }
+    if let Ok(n) = v { assert_eq!(n, 777) }
 }
 
 #[test]

@@ -112,7 +112,7 @@ fn target_can_be_sorted_via_ip_then_port() {
     let t1 = Target::new(IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)), 80);
     let t2 = Target::new(IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)), 443);
     let t3 = Target::new(IpAddr::V4(Ipv4Addr::new(2, 0, 0, 1)), 443);
-    let mut v = vec![t3.clone(), t1.clone(), t2.clone()];
+    let mut v = [t3.clone(), t1.clone(), t2.clone()];
     v.sort_by(|a, b| a.ip.cmp(&b.ip).then(a.port.cmp(&b.port)));
     assert_eq!(v[0], t1);
     assert_eq!(v[1], t2);

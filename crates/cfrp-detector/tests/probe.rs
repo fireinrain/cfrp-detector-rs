@@ -44,11 +44,11 @@ fn header_map_construction_case_insensitive_lookup() {
 #[test]
 fn status_code_classification_usable_2xx_and_3xx() {
     for code in [200u16, 201, 204, 301, 302, 304, 399] {
-        let usable = code >= 200 && code < 400;
+        let usable = (200..400).contains(&code);
         assert!(usable, "code {} should be usable", code);
     }
     for code in [100u16, 199, 400, 404, 500, 599] {
-        let usable = code >= 200 && code < 400;
+        let usable = (200..400).contains(&code);
         assert!(!usable, "code {} should NOT be usable", code);
     }
 }

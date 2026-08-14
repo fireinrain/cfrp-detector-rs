@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
             0.0
         };
         // 每完成 5 个 或 全部完成 时刷新
-        if p.completed == total || p.completed % 5 == 0 {
+        if p.completed == total || p.completed.is_multiple_of(5) {
             eprintln!(
                 "  [{:>3.0}%] {:>width$}/{total}  活跃并发={:>3}  已用时={:>5.1}s",
                 pct,

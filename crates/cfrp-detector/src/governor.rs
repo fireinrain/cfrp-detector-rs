@@ -165,15 +165,15 @@ impl ResourceGovernor {
         let now = Instant::now();
         let used = {
             let mut last = self.last_sample.lock();
-            let sample = match *last {
+            
+            match *last {
                 Some((t, v)) if now.duration_since(t) < self.config.resource_sample_interval => v,
                 _ => {
                     let v = self.fd_counter.open_fd_count();
                     *last = Some((now, v));
                     v
                 }
-            };
-            sample
+            }
         };
         let headroom = self.config.fd_safety_headroom;
         let budget = limit.saturating_sub(used).saturating_sub(headroom);
@@ -231,8 +231,8 @@ impl ResourceGovernor {
             .min(self.config.user_max_concurrency);
         let mut throttled_due_to_fd = capped < proposed;
 
-        if let Some(hard) = self.config.fd_ratio_hard_cap {
-            if fd_ratio >= hard {
+        if let Some(hard) = self.config.fd_ratio_hard_cap
+            && fd_ratio >= hard {
                 let reduced = (fd_limit.saturating_sub(fd_used) as f64 * 0.25).floor() as usize;
                 let reduced = reduced.max(1);
                 if reduced < capped {
@@ -240,9 +240,8 @@ impl ResourceGovernor {
                     throttled_due_to_fd = true;
                 }
             }
-        }
-        if let Some(soft) = self.config.fd_ratio_soft_cap {
-            if fd_ratio >= soft {
+        if let Some(soft) = self.config.fd_ratio_soft_cap
+            && fd_ratio >= soft {
                 let factor = (1.0 - (fd_ratio - soft) / (1.0 - soft)).max(0.25);
                 let reduced = (capped as f64 * factor).floor() as usize;
                 let reduced = reduced.max(1);
@@ -251,7 +250,6 @@ impl ResourceGovernor {
                     throttled_due_to_fd = true;
                 }
             }
-        }
 
         let mut throttled_due_to_res_errors = false;
         if error_ratio > self.config.resource_error_threshold {
@@ -293,11 +291,10 @@ pub fn classify_resource_error(err: &DetectorError) -> bool {
             if rw_err.is_connect() || rw_err.is_request() {
                 let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(rw_err);
                 while let Some(e) = cause {
-                    if let Some(io_src) = e.downcast_ref::<std::io::Error>() {
-                        if matches_io_resource_kind(io_src) {
+                    if let Some(io_src) = e.downcast_ref::<std::io::Error>()
+                        && matches_io_resource_kind(io_src) {
                             return true;
                         }
-                    }
                     cause = e.source();
                 }
             }

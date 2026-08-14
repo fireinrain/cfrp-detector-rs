@@ -41,8 +41,8 @@ async fn main() -> anyhow::Result<()> {
     let results = detector.detect_batch(&targets, None, concurrency).await;
 
     println!(
-        "{:<24} {:<8} {:<6} {:<6} {:<10} {}",
-        "IP:PORT", "EDGE?", "TLS?", "OK?", "CONF", "COLO / LATENCY"
+        "{:<24} {:<8} {:<6} {:<6} {:<10} COLO / LATENCY",
+        "IP:PORT", "EDGE?", "TLS?", "OK?", "CONF"
     );
     println!("{}", "-".repeat(85));
 
