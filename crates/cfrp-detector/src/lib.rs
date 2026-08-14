@@ -4,16 +4,16 @@
 //! classification and orchestration so the same engine can be embedded in a
 //! server or exposed through the CLI.
 
-mod cache;
-mod cidr;
+pub mod cache;
+pub mod cidr;
 pub mod connector;
-mod detector;
-mod error;
+pub mod detector;
+pub mod error;
 pub mod governor;
-mod location;
-mod model;
-mod probe;
-mod speedtest;
+pub mod location;
+pub mod model;
+pub mod probe;
+pub mod speedtest;
 
 pub use cache::{CacheConfig, FileCache};
 pub use cidr::{CidrSource, CloudflareCidrs, CloudflareRanges};

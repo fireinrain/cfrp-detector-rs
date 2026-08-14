@@ -1,19 +1,20 @@
 use criterion::{
-    async_executor::TokioExecutor, black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
+    criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
 };
 use cfrp_detector::{
     connector::{ConnectorConfig, PinnedConnector},
-    detector::{AdaptiveConfig, BatchTarget, Detector, DetectorConfig},
+    detector::DetectorConfig, // <--- 移除了 BatchTarget
     governor::{GovernorSnapshot, MockFdCounter, ResourceGovernor, ResourceGovernorConfig, classify_resource_error},
-    model::{Protocol, Target},
+    model::{BatchTarget, Target}, // <--- 将 BatchTarget 移到了这里
     probe::ProbeConfig,
-    speedtest::{SpeedTestConfig, SpeedTester},
+    speedtest::SpeedTester,
     DetectorError,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::hint::black_box; // 替换 criterion::black_box
+use std::net::{IpAddr, Ipv4Addr}; // 移除了未使用的 SocketAddr
+// 移除了未使用的 std::sync::Arc
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
