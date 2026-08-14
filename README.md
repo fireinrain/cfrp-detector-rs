@@ -3,7 +3,6 @@
 
 > **Cloudflare 边缘节点检测器 + 网络质量探测套件**  
 > 高性能 Rust 实现的 Cloudflare 边缘 IP 识别、地理定位与带宽/延迟质量评估工具  
-> Go 版本 CLI 行为完全兼容
 
 [![CI Status](https://img.shields.io/github/actions/workflow/status/fireinrain/cfrp-detector/ci.yml?branch=main)](https://github.com/fireinrain/cfrp-detector/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
@@ -466,4 +465,3 @@ CI (`.github/workflows/ci.yml`) 除了以上四步，还会通过 `apt-get insta
 ## 📝 License
 
 **MIT** © fireinrain — 详见仓库根目录 `LICENSE` 文件
-```
