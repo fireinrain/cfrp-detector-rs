@@ -840,7 +840,9 @@ open tcp 8443 104.17.200.10 1710000001
             }
             _ => {
                 // 多网卡: 按设计应该报错 (要求用户显式指定)
-                let err = s.resolve_interface().expect_err("多网卡时应返回错误, 要求用户选择 interface");
+                let err = s
+                    .resolve_interface()
+                    .expect_err("多网卡时应返回错误, 要求用户选择 interface");
                 let msg = format!("{err}");
                 assert!(
                     msg.contains("multiple network interfaces"),
