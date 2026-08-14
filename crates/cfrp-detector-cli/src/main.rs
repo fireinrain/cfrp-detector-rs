@@ -1,16 +1,17 @@
 use anyhow::{Context, Result};
 use cfrp_detector::{
-    AdaptiveConfig, BatchProgress, BatchTarget, Confidence, Detector,
-    DetectorConfig, SpeedTestConfig, SpeedTester, Target,
+    AdaptiveConfig, BatchProgress, BatchTarget, Confidence, Detector, DetectorConfig,
+    MasscanConfig, MasscanPipeline, MasscanScanner, PipelineAsnTask, PipelineOptions, Target,
+    SpeedTestConfig, SpeedTester,
 };
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use figment::{Figment, providers::{Env, Format, Toml, Serialized}};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
-    net::IpAddr,
+    net::{IpAddr, Ipv4Addr},
     path::PathBuf,
     str::FromStr,
     sync::Arc,
@@ -148,6 +149,44 @@ impl Default for ConfigFile {
     }
 }
 
+#[derive(Debug, Subcommand)]
+enum MasscanCmd {
+    #[command(name = "single-asn", about = "Scan a single ASN with masscan")]
+    SingleAsn {
+        #[arg(long, default_value_t = 45102, help = "ASN number to scan")]
+        asn: u32,
+        #[arg(long, help = "Enable TLS (default: yes)")]
+        tls: Option<bool>,
+        #[arg(long, help = "Ports to scan, e.g. 443, 443,8443, 1-65535")]
+        port: Option<String>,
+    },
+    #[command(name = "batch-asn", about = "Scan multiple ASNs from a list file")]
+    BatchAsn {
+        #[arg(short = 'f', long = "file", default_value = "as.txt", help = "ASN list file, format ASN:PORT:TLS per line")]
+        filename: PathBuf,
+    },
+    #[command(name = "single-ip", about = "Scan a single IP address")]
+    SingleIp {
+        #[arg(long, help = "IP address to scan")]
+        ip: Option<IpAddr>,
+        #[arg(long, help = "Enable TLS (default: yes)")]
+        tls: Option<bool>,
+        #[arg(long, help = "Ports to scan, e.g. 1-65535")]
+        port: Option<String>,
+    },
+    #[command(name = "batch-ip", about = "Scan multiple IPs from a list file")]
+    BatchIp {
+        #[arg(short = 'f', long = "file", default_value = "ips.txt", help = "IP list file, one IP per line")]
+        filename: PathBuf,
+        #[arg(long, help = "Enable TLS (default: yes)")]
+        tls: Option<bool>,
+        #[arg(long, help = "Ports to scan, e.g. 1-65535")]
+        port: Option<String>,
+    },
+    #[command(name = "clear-cache", about = "Clear ASN cache, interface setting, and temp files")]
+    ClearCache,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "cfrp-detector",
@@ -201,7 +240,7 @@ struct Cli {
         short = 'c',
         long = "concurrency",
         default_value_t = 10,
-        help = "Initial worker concurrency (for adaptive, this is ignored in favour of --a-initial)"
+        help = "Initial worker concurrency (for adaptive, this is ignored in favour of --a-initial). For masscan: CF-edge detection thread count."
     )]
     concurrency: usize,
 
@@ -308,6 +347,50 @@ struct Cli {
         help = "Enable TLS 0-RTT early data in the speed-test (requires TLS session cache warmup on the same endpoint first)"
     )]
     speedtest_0rtt: bool,
+
+    #[arg(
+        long = "interface",
+        help = "Network interface used by masscan (e.g. eth0). If omitted, auto-detected or loaded from setting.txt"
+    )]
+    interface: Option<String>,
+
+    #[arg(
+        long = "rate",
+        default_value_t = 10000,
+        help = "masscan pps packet rate (default 10000)"
+    )]
+    rate: u64,
+
+    #[arg(
+        long = "masscan-bin",
+        value_name = "FILE",
+        help = "Path to masscan binary (default: ./masscan if present, otherwise 'masscan' on PATH)"
+    )]
+    masscan_binary: Option<PathBuf>,
+
+    #[arg(
+        long = "asn-cache-dir",
+        default_value = "asn",
+        help = "Directory used for caching ASN CIDR lists (default: ./asn)"
+    )]
+    asn_cache_dir: PathBuf,
+
+    #[arg(
+        long = "iface-setting-file",
+        default_value = "setting.txt",
+        help = "Path to the file persisting the default network interface (default: ./setting.txt)"
+    )]
+    iface_setting_file: PathBuf,
+
+    #[arg(
+        long = "output-dir",
+        default_value = ".",
+        help = "Directory where masscan pipeline CSV outputs are written (default: current dir)"
+    )]
+    output_dir: PathBuf,
+
+    #[command(subcommand)]
+    masscan: Option<MasscanCmd>,
 
     #[arg(value_name = "TARGET", help = "Targets in form ip[:port] or [ipv6]:port")]
     targets: Vec<String>,
@@ -697,6 +780,146 @@ fn build_signals_token(grace_seconds: u64) -> (CancellationToken, std::pin::Pin<
     (cancel, Box::pin(fut))
 }
 
+fn build_masscan_scanner(cli: &Cli) -> MasscanScanner {
+    let mut mcfg = MasscanConfig::new();
+    mcfg.interface = cli.interface.clone();
+    mcfg.rate = cli.rate;
+    mcfg.masscan_binary_path = cli.masscan_binary.clone();
+    mcfg.asn_cache_dir = cli.asn_cache_dir.clone();
+    mcfg.iface_setting_file = cli.iface_setting_file.clone();
+    MasscanScanner::new(mcfg)
+}
+
+fn build_pipeline_options(cli: &Cli, cfg_merged: &ConfigFile) -> PipelineOptions {
+    PipelineOptions {
+        domain: cfg_merged.domain.clone(),
+        concurrency: if cli.concurrency != 10 { cli.concurrency } else { cfg_merged.concurrency.max(100) },
+        speedtest: cfg_merged.speedtest,
+        speedtest_threads: cfg_merged.speedtest_threads,
+        speedtest_url_path: cfg_merged.speedtest_url_path.clone(),
+        speedtest_concurrency: cfg_merged.speedtest_concurrency,
+        output_dir: cli.output_dir.clone(),
+        adaptive_min: cfg_merged.a_min,
+        adaptive_max: cfg_merged.a_max,
+        probe_timeout_secs: cfg_merged.probe_timeout_secs,
+        tls_session_cache: cfg_merged.tls_session_cache,
+    }
+}
+
+async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bool> {
+    let Some(mcmd) = cli.masscan.as_ref() else {
+        return Ok(false);
+    };
+    match mcmd {
+        MasscanCmd::ClearCache => {
+            let asn_dir = cli.asn_cache_dir.clone();
+            let setting = cli.iface_setting_file.clone();
+            cfrp_detector::clear_cache(&asn_dir, &setting)?;
+            println!("masscan cache cleared: asn_dir={}, setting={}", asn_dir.display(), setting.display());
+            return Ok(true);
+        }
+        MasscanCmd::SingleAsn { asn, tls, port } => {
+            let tls = tls.unwrap_or(true);
+            let default_port = if tls { "443" } else { "80" };
+            let port_str = port.as_deref().unwrap_or(default_port).to_string();
+            let scanner = build_masscan_scanner(cli);
+            scanner.check_masscan_available()?;
+            let pipeline = MasscanPipeline::new(build_pipeline_options(cli, cfg_merged));
+            let started = std::time::Instant::now();
+            let out = pipeline
+                .run_single_asn(&scanner, *asn, &port_str, tls)
+                .await?;
+            println!(
+                "single-asn AS{} done: open={} edges={} masscan_sec={} detect_sec={} output={} total_sec={}",
+                asn,
+                out.open_ports_count,
+                out.cloudflare_edges_count,
+                out.masscan_duration_secs,
+                out.detection_duration_secs,
+                out.output_path.display(),
+                started.elapsed().as_secs()
+            );
+            return Ok(true);
+        }
+        MasscanCmd::BatchAsn { filename } => {
+            let tasks_raw = MasscanScanner::read_asn_task_file(filename)?;
+            if tasks_raw.is_empty() {
+                anyhow::bail!("no ASN tasks found in {}", filename.display());
+            }
+            let tasks: Vec<PipelineAsnTask> = tasks_raw.into_iter().map(PipelineAsnTask::from).collect();
+            let scanner = build_masscan_scanner(cli);
+            scanner.check_masscan_available()?;
+            let pipeline = MasscanPipeline::new(build_pipeline_options(cli, cfg_merged));
+            let started = std::time::Instant::now();
+            let result = pipeline.run_batch_asn(&scanner, tasks).await?;
+            for o in &result.outputs {
+                println!(
+                    "batch-asn {}: open={} edges={} masscan_sec={} detect_sec={} output={}",
+                    o.label,
+                    o.open_ports_count,
+                    o.cloudflare_edges_count,
+                    o.masscan_duration_secs,
+                    o.detection_duration_secs,
+                    o.output_path.display()
+                );
+            }
+            println!("batch-asn finished {} tasks in {}s", result.outputs.len(), started.elapsed().as_secs());
+            return Ok(true);
+        }
+        MasscanCmd::SingleIp { ip, tls, port } => {
+            let target_ip = ip.unwrap_or_else(|| IpAddr::V4(Ipv4Addr::new(172, 67, 73, 54)));
+            let tls = tls.unwrap_or(true);
+            let default_port = if tls { "1-65535" } else { "1-65535" };
+            let port_str = port.as_deref().unwrap_or(default_port).to_string();
+            let scanner = build_masscan_scanner(cli);
+            scanner.check_masscan_available()?;
+            let pipeline = MasscanPipeline::new(build_pipeline_options(cli, cfg_merged));
+            let started = std::time::Instant::now();
+            let out = pipeline
+                .run_single_ip(&scanner, target_ip, &port_str, tls)
+                .await?;
+            println!(
+                "single-ip {} done: open={} edges={} masscan_sec={} detect_sec={} output={} total_sec={}",
+                target_ip,
+                out.open_ports_count,
+                out.cloudflare_edges_count,
+                out.masscan_duration_secs,
+                out.detection_duration_secs,
+                out.output_path.display(),
+                started.elapsed().as_secs()
+            );
+            return Ok(true);
+        }
+        MasscanCmd::BatchIp { filename, tls, port } => {
+            let ips = MasscanScanner::read_ip_list_file(filename)?;
+            if ips.is_empty() {
+                anyhow::bail!("no IPs found in {}", filename.display());
+            }
+            let tls = tls.unwrap_or(true);
+            let default_port = if tls { "1-65535" } else { "1-65535" };
+            let port_str = port.as_deref().unwrap_or(default_port).to_string();
+            let scanner = build_masscan_scanner(cli);
+            scanner.check_masscan_available()?;
+            let pipeline = MasscanPipeline::new(build_pipeline_options(cli, cfg_merged));
+            let started = std::time::Instant::now();
+            let out = pipeline
+                .run_batch_ip(&scanner, &ips, &port_str, tls)
+                .await?;
+            println!(
+                "batch-ip {} done: open={} edges={} masscan_sec={} detect_sec={} output={} total_sec={}",
+                filename.display(),
+                out.open_ports_count,
+                out.cloudflare_edges_count,
+                out.masscan_duration_secs,
+                out.detection_duration_secs,
+                out.output_path.display(),
+                started.elapsed().as_secs()
+            );
+            return Ok(true);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -706,6 +929,10 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     let cfg_merged = merge_config(&cli).context("merge layered config (file + env + cli)")?;
+
+    if run_masscan_subcommand(&cli, &cfg_merged).await? {
+        return Ok(());
+    }
 
     if cfg_merged.bench || cfg_merged.bench_quick {
         let report = run_in_process_bench(cfg_merged.bench_quick);
@@ -788,7 +1015,7 @@ async fn main() -> Result<()> {
             ProgressStyle::with_template(
                 "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) c={msg}",
             )
-            .unwrap()
+            .expect("progress template must be valid indicatif syntax")
             .progress_chars("=>-"),
         );
         Some(bar)
@@ -1173,4 +1400,253 @@ fn parse_target(raw: &str, default_port: u16) -> Result<Option<Target>> {
         )));
     }
     anyhow::bail!("invalid target: {s}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_parser_has_masscan_subcommands() {
+        let cmd = Cli::command();
+        let help_text = {
+            let mut buf = Vec::new();
+            cmd.clone().write_help(&mut buf).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        assert!(help_text.contains("masscan"), "help should mention masscan subcommands");
+    }
+
+    #[test]
+    fn cli_parse_masscan_clear_cache() {
+        let args = &["cfrp-detector", "--asn-cache-dir", "/tmp/asn", "--iface-setting-file", "/tmp/if.txt", "clear-cache"];
+        let cli = Cli::try_parse_from(args).expect("parse clear-cache");
+        let cmd = cli.masscan.as_ref().expect("has masscan sub");
+        assert!(matches!(cmd, MasscanCmd::ClearCache));
+        assert_eq!(cli.asn_cache_dir, PathBuf::from("/tmp/asn"));
+        assert_eq!(cli.iface_setting_file, PathBuf::from("/tmp/if.txt"));
+    }
+
+    #[test]
+    fn cli_parse_masscan_single_asn_defaults() {
+        let args = &["cfrp-detector", "single-asn"];
+        let cli = Cli::try_parse_from(args).expect("parse single-asn defaults");
+        let cmd = cli.masscan.as_ref().expect("has sub");
+        let MasscanCmd::SingleAsn { asn, tls, port } = cmd else {
+            unreachable!("expected SingleAsn variant, got {cmd:?}");
+        };
+        assert_eq!(*asn, 45102);
+        assert!(tls.is_none());
+        assert!(port.is_none());
+        assert_eq!(cli.rate, 10000);
+        assert_eq!(cli.concurrency, 10);
+    }
+
+    #[test]
+    fn cli_parse_masscan_single_asn_explicit() {
+        let args = &[
+            "cfrp-detector",
+            "--rate", "50000",
+            "--concurrency", "300",
+            "--domain", "example.com",
+            "single-asn",
+            "--asn", "132203",
+            "--tls", "true",
+            "--port", "443,8443",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse single-asn explicit");
+        assert_eq!(cli.rate, 50000);
+        assert_eq!(cli.concurrency, 300);
+        assert_eq!(cli.domain.as_deref(), Some("example.com"));
+        let MasscanCmd::SingleAsn { asn, tls, port } = cli.masscan.as_ref().expect("has sub") else {
+            unreachable!("expected SingleAsn variant");
+        };
+        assert_eq!(*asn, 132203);
+        assert_eq!(*tls, Some(true));
+        assert_eq!(port.as_deref(), Some("443,8443"));
+    }
+
+    #[test]
+    fn cli_parse_masscan_batch_asn() {
+        let args = &["cfrp-detector", "batch-asn", "-f", "custom_asn.txt"];
+        let cli = Cli::try_parse_from(args).expect("parse batch-asn");
+        let MasscanCmd::BatchAsn { filename } = cli.masscan.as_ref().expect("sub") else {
+            unreachable!("expected BatchAsn variant");
+        };
+        assert_eq!(filename, &PathBuf::from("custom_asn.txt"));
+    }
+
+    #[test]
+    fn cli_parse_masscan_batch_asn_default_file() {
+        let args = &["cfrp-detector", "batch-asn"];
+        let cli = Cli::try_parse_from(args).expect("parse batch-asn default");
+        let MasscanCmd::BatchAsn { filename } = cli.masscan.as_ref().expect("sub") else {
+            unreachable!("expected BatchAsn variant");
+        };
+        assert_eq!(filename, &PathBuf::from("as.txt"));
+    }
+
+    #[test]
+    fn cli_parse_masscan_single_ip_default() {
+        let args = &["cfrp-detector", "single-ip"];
+        let cli = Cli::try_parse_from(args).expect("parse single-ip default");
+        let MasscanCmd::SingleIp { ip, tls, port } = cli.masscan.as_ref().expect("sub") else {
+            unreachable!("expected SingleIp variant");
+        };
+        assert!(ip.is_none());
+        assert!(tls.is_none());
+        assert!(port.is_none());
+    }
+
+    #[test]
+    fn cli_parse_masscan_single_ip_explicit() {
+        let args = &[
+            "cfrp-detector",
+            "--interface", "eth1",
+            "single-ip",
+            "--ip", "10.0.0.1",
+            "--tls", "false",
+            "--port", "80,8080",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse single-ip explicit");
+        assert_eq!(cli.interface.as_deref(), Some("eth1"));
+        let MasscanCmd::SingleIp { ip, tls, port } = cli.masscan.as_ref().expect("sub") else {
+            unreachable!("expected SingleIp variant");
+        };
+        assert_eq!(*ip, Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert_eq!(*tls, Some(false));
+        assert_eq!(port.as_deref(), Some("80,8080"));
+    }
+
+    #[test]
+    fn cli_parse_masscan_batch_ip() {
+        let args = &[
+            "cfrp-detector",
+            "--output-dir", "/tmp/out",
+            "--masscan-bin", "/usr/local/bin/masscan",
+            "batch-ip",
+            "-f", "my_ips.txt",
+            "--tls", "true",
+            "--port", "443",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse batch-ip");
+        assert_eq!(cli.output_dir, PathBuf::from("/tmp/out"));
+        assert_eq!(cli.masscan_binary.as_deref(), Some(PathBuf::from("/usr/local/bin/masscan").as_path()));
+        let MasscanCmd::BatchIp { filename, tls, port } = cli.masscan.as_ref().expect("sub") else {
+            unreachable!("expected BatchIp variant");
+        };
+        assert_eq!(filename, &PathBuf::from("my_ips.txt"));
+        assert_eq!(*tls, Some(true));
+        assert_eq!(port.as_deref(), Some("443"));
+    }
+
+    #[test]
+    fn cli_parse_masscan_batch_ip_default_file() {
+        let args = &["cfrp-detector", "batch-ip"];
+        let cli = Cli::try_parse_from(args).expect("parse batch-ip default");
+        let MasscanCmd::BatchIp { filename, tls, port } = cli.masscan.as_ref().expect("sub") else {
+            unreachable!("expected BatchIp variant");
+        };
+        assert_eq!(filename, &PathBuf::from("ips.txt"));
+        assert!(tls.is_none());
+        assert!(port.is_none());
+    }
+
+    #[test]
+    fn build_masscan_scanner_preserves_flags() {
+        let args = &[
+            "cfrp-detector",
+            "--rate", "25000",
+            "--interface", "enp0s3",
+            "--asn-cache-dir", "/a/cache",
+            "--iface-setting-file", "/a/s.txt",
+            "--masscan-bin", "/bin/ms",
+            "single-asn",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        let scanner = build_masscan_scanner(&cli);
+        assert_eq!(scanner.cfg.rate, 25000);
+        assert_eq!(scanner.cfg.interface.as_deref(), Some("enp0s3"));
+        assert_eq!(scanner.cfg.asn_cache_dir, PathBuf::from("/a/cache"));
+        assert_eq!(scanner.cfg.iface_setting_file, PathBuf::from("/a/s.txt"));
+        assert_eq!(scanner.cfg.masscan_binary_path.as_deref(), Some(PathBuf::from("/bin/ms").as_path()));
+    }
+
+    #[test]
+    fn build_pipeline_options_inherits_detection_flags() {
+        let cli = Cli::try_parse_from(&[
+            "cfrp-detector",
+            "--output-dir", "/tmp/outs",
+            "--timeout", "5",
+            "--tls-session-cache", "512",
+            "--a-min", "4",
+            "--a-max", "200",
+            "--concurrency", "150",
+            "single-asn",
+        ])
+        .unwrap();
+        let cfg = merge_config(&cli).unwrap();
+        let opts = build_pipeline_options(&cli, &cfg);
+        assert_eq!(opts.probe_timeout_secs, 5);
+        assert_eq!(opts.tls_session_cache, 512);
+        assert_eq!(opts.adaptive_min, 4);
+        assert_eq!(opts.adaptive_max, 200);
+        assert_eq!(opts.concurrency, 150);
+        assert_eq!(opts.output_dir, PathBuf::from("/tmp/outs"));
+    }
+
+    #[test]
+    fn main_help_no_panic() {
+        let args = &["cfrp-detector", "--help"];
+        let res = Cli::try_parse_from(args);
+        assert!(res.is_err(), "--help should cause a clap exit");
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn single_asn_help_no_panic() {
+        let args = &["cfrp-detector", "single-asn", "--help"];
+        let res = Cli::try_parse_from(args);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn batch_asn_help_no_panic() {
+        let args = &["cfrp-detector", "batch-asn", "--help"];
+        let res = Cli::try_parse_from(args);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn single_ip_help_no_panic() {
+        let args = &["cfrp-detector", "single-ip", "--help"];
+        let res = Cli::try_parse_from(args);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn batch_ip_help_no_panic() {
+        let args = &["cfrp-detector", "batch-ip", "--help"];
+        let res = Cli::try_parse_from(args);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn clear_cache_help_no_panic() {
+        let args = &["cfrp-detector", "clear-cache", "--help"];
+        let res = Cli::try_parse_from(args);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
 }

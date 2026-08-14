@@ -39,6 +39,8 @@ pub enum DetectorError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("CSV error: {0}")]
+    Csv(#[from] csv::Error),
     #[error("HTTP error: {0}")]
     Http(String),
     #[error("data source error: {0}")]
