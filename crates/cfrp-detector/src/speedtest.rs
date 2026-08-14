@@ -198,9 +198,7 @@ impl SpeedTester {
         } else {
             total.saturating_mul(1_000_000_000) / elapsed.as_nanos() as u64
         };
-        let ttfb = (*first_byte
-            .lock())
-            .filter(|&d| !d.is_zero());
+        let ttfb = (*first_byte.lock()).filter(|&d| !d.is_zero());
         let mut result = SpeedTestResult {
             target: target.clone(),
             bytes_per_second: bps,
@@ -325,9 +323,7 @@ impl SpeedTester {
                     } else {
                         total.saturating_mul(1_000_000_000) / elapsed.as_nanos() as u64
                     };
-                    let ttfb = (*first_byte
-                        .lock())
-                        .filter(|&d| !d.is_zero());
+                    let ttfb = (*first_byte.lock()).filter(|&d| !d.is_zero());
                     let mut result = SpeedTestResult {
                         target,
                         bytes_per_second: bps,

@@ -1447,13 +1447,14 @@ fn infer_format(cfg: &ConfigFile) -> OutputFormat {
         return f;
     }
     if let Some(p) = cfg.output.as_ref()
-        && let Some(ext) = p.extension().and_then(|x| x.to_str()) {
-            match ext.to_ascii_lowercase().as_str() {
-                "txt" | "text" => return OutputFormat::Txt,
-                "csv" => return OutputFormat::Csv,
-                _ => {}
-            }
+        && let Some(ext) = p.extension().and_then(|x| x.to_str())
+    {
+        match ext.to_ascii_lowercase().as_str() {
+            "txt" | "text" => return OutputFormat::Txt,
+            "csv" => return OutputFormat::Csv,
+            _ => {}
         }
+    }
     OutputFormat::Json
 }
 

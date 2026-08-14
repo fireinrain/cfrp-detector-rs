@@ -201,9 +201,10 @@ impl MasscanPipeline {
         speed: &std::collections::HashMap<String, u64>,
     ) -> Result<()> {
         if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
         let mut wtr = CsvWriter::from_path(path)?;
         for br in results {
             let speed_bps = speed.get(&br.target.to_string()).copied();

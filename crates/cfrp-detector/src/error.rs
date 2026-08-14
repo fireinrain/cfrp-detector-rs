@@ -62,9 +62,10 @@ pub fn is_retryable_error(err: &DetectorError) -> bool {
                 let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(rw_err);
                 while let Some(e) = cause {
                     if let Some(io_src) = e.downcast_ref::<std::io::Error>()
-                        && matches_io_transient(io_src) {
-                            return true;
-                        }
+                        && matches_io_transient(io_src)
+                    {
+                        return true;
+                    }
                     cause = e.source();
                 }
             }

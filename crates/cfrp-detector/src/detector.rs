@@ -236,9 +236,10 @@ impl Detector {
         }
 
         if result.is_cloudflare_edge
-            && let Some(edge) = self.fetch_edge_info(target, result.is_tls, &host).await? {
-                result.edge_info = Some(edge);
-            }
+            && let Some(edge) = self.fetch_edge_info(target, result.is_tls, &host).await?
+        {
+            result.edge_info = Some(edge);
+        }
         Ok(result)
     }
 

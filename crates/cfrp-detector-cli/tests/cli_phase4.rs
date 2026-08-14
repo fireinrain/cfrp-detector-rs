@@ -50,7 +50,9 @@ fn phase4_4_env_var_cfrp_concurrency_applied() {
         figment::Figment::new().merge(figment::providers::Env::prefixed("CFRP_").split("_"));
     let v: Result<usize, _> = figment.extract_inner("concurrency");
     unsafe { std::env::remove_var("CFRP_CONCURRENCY") };
-    if let Ok(n) = v { assert_eq!(n, 777) }
+    if let Ok(n) = v {
+        assert_eq!(n, 777)
+    }
 }
 
 #[test]

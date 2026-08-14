@@ -6,8 +6,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum ScanMode {
     #[default]
     SingleAsn,
@@ -15,7 +14,6 @@ pub enum ScanMode {
     SingleIp,
     BatchIp,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsnTask {
@@ -92,9 +90,10 @@ impl MasscanScanner {
 
     pub fn resolve_masscan_cmd(&self) -> PathBuf {
         if let Some(p) = self.cfg.masscan_binary_path.as_ref()
-            && p.exists() {
-                return p.clone();
-            }
+            && p.exists()
+        {
+            return p.clone();
+        }
         let local = PathBuf::from("./masscan");
         if local.exists() {
             return local;
@@ -104,8 +103,7 @@ impl MasscanScanner {
 
     pub fn check_masscan_available(&self) -> Result<PathBuf> {
         let cmd = self.resolve_masscan_cmd();
-        let is_local =
-            cmd.is_relative() || cmd.parent().is_some() && cmd != *"masscan";
+        let is_local = cmd.is_relative() || cmd.parent().is_some() && cmd != *"masscan";
         if is_local && cmd.exists() {
             return Ok(cmd);
         }
@@ -162,12 +160,13 @@ impl MasscanScanner {
             return Ok(iface.clone());
         }
         if self.cfg.iface_setting_file.exists()
-            && let Ok(content) = std::fs::read_to_string(&self.cfg.iface_setting_file) {
-                let trimmed = content.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Ok(trimmed);
-                }
+            && let Ok(content) = std::fs::read_to_string(&self.cfg.iface_setting_file)
+        {
+            let trimmed = content.trim().to_string();
+            if !trimmed.is_empty() {
+                return Ok(trimmed);
             }
+        }
         let ifaces = Self::list_interfaces()?;
         match ifaces.len() {
             0 => Err(DetectorError::DataSource(
@@ -184,9 +183,10 @@ impl MasscanScanner {
 
     pub fn save_interface_setting(&self, name: &str) -> Result<()> {
         if let Some(parent) = self.cfg.iface_setting_file.parent()
-            && !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(&self.cfg.iface_setting_file, name)?;
         Ok(())
     }
@@ -343,10 +343,12 @@ fn parse_ipip_asn_html(html: &str, asn: u32) -> Vec<String> {
                         .chars()
                         .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '/' || *c == ':')
                         .collect();
-                    if !cidr_candidate.contains(':') && cidr_candidate.contains('/')
-                        && seen.insert(cidr_candidate.clone()) {
-                            out.push(cidr_candidate);
-                        }
+                    if !cidr_candidate.contains(':')
+                        && cidr_candidate.contains('/')
+                        && seen.insert(cidr_candidate.clone())
+                    {
+                        out.push(cidr_candidate);
+                    }
                 }
             }
         }
@@ -407,10 +409,11 @@ fn regex_fallback(line: &str) -> Vec<String> {
             if pfx_start < i {
                 let prefix = &line[pfx_start..i];
                 if let Ok(p) = prefix.parse::<u8>()
-                    && p <= 32 {
-                        out.push(format!("{}/{}", ip_part, p));
-                        continue;
-                    }
+                    && p <= 32
+                {
+                    out.push(format!("{}/{}", ip_part, p));
+                    continue;
+                }
             }
         }
     }

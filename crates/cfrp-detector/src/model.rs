@@ -26,24 +26,27 @@ pub fn parse_target(s: &str, default_port: u16) -> Result<Target, String> {
         return Ok(Target::new(ip, default_port));
     }
     if s.starts_with('[')
-        && let Some(close_idx) = s.find(']') {
-            let inner = &s[1..close_idx];
-            let rest = &s[close_idx + 1..];
-            if rest.is_empty() {
-                if let Ok(ip) = IpAddr::from_str(inner) {
-                    return Ok(Target::new(ip, default_port));
-                }
-            } else if let Some(rhs) = rest.strip_prefix(':')
-                && let Ok(ip) = IpAddr::from_str(inner)
-                    && let Ok(p) = rhs.parse::<u16>() {
-                        return Ok(Target::new(ip, p));
-                    }
+        && let Some(close_idx) = s.find(']')
+    {
+        let inner = &s[1..close_idx];
+        let rest = &s[close_idx + 1..];
+        if rest.is_empty() {
+            if let Ok(ip) = IpAddr::from_str(inner) {
+                return Ok(Target::new(ip, default_port));
+            }
+        } else if let Some(rhs) = rest.strip_prefix(':')
+            && let Ok(ip) = IpAddr::from_str(inner)
+            && let Ok(p) = rhs.parse::<u16>()
+        {
+            return Ok(Target::new(ip, p));
         }
+    }
     if let Some((lhs, rhs)) = s.rsplit_once(':')
         && let Ok(p) = rhs.parse::<u16>()
-            && let Ok(ip) = IpAddr::from_str(lhs) {
-                return Ok(Target::new(ip, p));
-            }
+        && let Ok(ip) = IpAddr::from_str(lhs)
+    {
+        return Ok(Target::new(ip, p));
+    }
     Err(format!("invalid target: {}", s))
 }
 

@@ -626,39 +626,39 @@ async fn read_http_response<S: AsyncRead + AsyncWrite + Unpin>(
         }
         buf.extend_from_slice(&tmp[..n]);
 
-        if !headers_done
-            && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                header_len = pos + 4;
-                headers_done = true;
-                let (hdr_bytes, _) = buf.split_at(pos);
-                let hdr_text = String::from_utf8_lossy(hdr_bytes);
-                let mut lines = hdr_text.lines();
-                if let Some(status_line) = lines.next()
-                    && let Some(code_part) = status_line.split_whitespace().nth(1)
-                        && let Ok(code) = code_part.parse::<u16>()
-                            && let Ok(sc) = StatusCode::from_u16(code) {
-                                status_code = sc;
-                            }
-                for line in lines {
-                    if let Some((k, v)) = line.split_once(':') {
-                        let k = k.trim();
-                        let v = v.trim();
-                        if let Ok(name) = HeaderName::from_bytes(k.as_bytes())
-                            && let Ok(val) = HeaderValue::from_str(v) {
-                                headers.insert(name, val);
-                            }
-                        let k_lower = k.to_ascii_lowercase();
-                        if k_lower == "content-length" {
-                            content_length = v.parse::<usize>().ok();
-                        }
-                        if k_lower == "transfer-encoding"
-                            && v.to_ascii_lowercase().contains("chunked")
-                        {
-                            chunked = true;
-                        }
+        if !headers_done && let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_len = pos + 4;
+            headers_done = true;
+            let (hdr_bytes, _) = buf.split_at(pos);
+            let hdr_text = String::from_utf8_lossy(hdr_bytes);
+            let mut lines = hdr_text.lines();
+            if let Some(status_line) = lines.next()
+                && let Some(code_part) = status_line.split_whitespace().nth(1)
+                && let Ok(code) = code_part.parse::<u16>()
+                && let Ok(sc) = StatusCode::from_u16(code)
+            {
+                status_code = sc;
+            }
+            for line in lines {
+                if let Some((k, v)) = line.split_once(':') {
+                    let k = k.trim();
+                    let v = v.trim();
+                    if let Ok(name) = HeaderName::from_bytes(k.as_bytes())
+                        && let Ok(val) = HeaderValue::from_str(v)
+                    {
+                        headers.insert(name, val);
+                    }
+                    let k_lower = k.to_ascii_lowercase();
+                    if k_lower == "content-length" {
+                        content_length = v.parse::<usize>().ok();
+                    }
+                    if k_lower == "transfer-encoding" && v.to_ascii_lowercase().contains("chunked")
+                    {
+                        chunked = true;
                     }
                 }
             }
+        }
 
         if headers_done {
             let have_body_bytes = buf.len() - header_len;
@@ -667,9 +667,10 @@ async fn read_http_response<S: AsyncRead + AsyncWrite + Unpin>(
                     break;
                 }
             } else if let Some(cl) = content_length
-                && have_body_bytes >= cl {
-                    break;
-                }
+                && have_body_bytes >= cl
+            {
+                break;
+            }
         }
         if headers_done && n == 0 {
             break;
