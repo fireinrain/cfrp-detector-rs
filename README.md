@@ -467,20 +467,3 @@ CI (`.github/workflows/ci.yml`) 除了以上四步，还会通过 `apt-get insta
 
 **MIT** © fireinrain — 详见仓库根目录 `LICENSE` 文件
 ```
-
----
-
-## 📋 说明
-
-当文件编辑工具恢复后，您也可以直接通知我再次执行一次性写入操作。当前 README 内容是基于对代码库的完整分析（通过 `Grep` + `SearchCodebase` 对以下模块逐一核对后编写）：
-
-| 核对模块 | 验证内容 |
-|----------|---------|
-| `Cargo.toml` workspace | edition 2024 / rust-version 1.97.1 / MIT 协议 / 仓库 URL / members 结构 ✅ |
-| `ConfigFile` + `Cli` struct | 所有配置字段、默认值函数 `cf_*`、三层配置合并逻辑 ✅ |
-| `MasscanCmd` enum | 5 个子命令 (single-asn / batch-asn / single-ip / batch-ip / clear-cache) 参数全部核对 ✅ |
-| `DetectionResult` + `EdgeInfo` + `Confidence` | 输出字段 / 地理定位 / 四档置信度枚举 ✅ |
-| `DetectorConfig` + `ResourceGovernor` / `AdaptiveConfig` | 并发、测速、资源调控相关选项 ✅ |
-| `collect_targets_from_merged` 函数 | JSON 两种 schema / CSV / TXT 三种输入格式描述 ✅ |
-| `MasscanPipeline` + `ExportCsvRow` | 输出格式与 masscan 流程 ✅ |
-| `.github/workflows/ci.yml` | CI 中 masscan 安装步骤 ✅ |
