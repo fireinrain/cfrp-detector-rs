@@ -2309,11 +2309,18 @@ fn merge_speedtest_config(cli: &Cli, st: &SpeedTestArgs) -> Result<ConfigFile> {
                 | "TLS_SESSION_CACHE"
                 | "SPEEDTEST_0RTT"
                 | "GRACE_SECONDS"
+                | "CONCURRENCY"
         )
     }));
     let mut cfg: ConfigFile = fig
         .extract()
         .context("merge env + config file into speedtest ConfigFile")?;
+
+    if cfg.speedtest_concurrency == cf_speedtest_concurrency()
+        && cfg.concurrency != cf_concurrency()
+    {
+        cfg.speedtest_concurrency = cfg.concurrency;
+    }
 
     let has_any_config_file = resolve_config_path(cli).is_some();
     let mut cli_targets: Vec<String> = st.targets.clone();
@@ -2345,14 +2352,27 @@ fn merge_speedtest_config(cli: &Cli, st: &SpeedTestArgs) -> Result<ConfigFile> {
     cfg.speedtest_only = true;
     cfg.speedtest_0rtt = cfg.speedtest_0rtt || st.enable_0rtt;
 
-    cfg.speedtest_threads = st.threads;
-    cfg.speedtest_timeout_secs = st.timeout_secs;
-    cfg.speedtest_concurrency = st.concurrency;
-    cfg.tls_session_cache = st.tls_session_cache;
+    let args: Vec<String> = std::env::args().collect();
+    let cli_has = |flags: &[&str]| -> bool {
+        args.iter()
+            .any(|a| flags.iter().any(|f| a == f || a.starts_with(&format!("{f}="))))
+    };
+
+    if cli_has(&["-t", "--threads"]) {
+        cfg.speedtest_threads = st.threads;
+    }
+    if cli_has(&["--timeout"]) {
+        cfg.speedtest_timeout_secs = st.timeout_secs;
+    }
+    if cli_has(&["-C", "--concurrency"]) {
+        cfg.speedtest_concurrency = st.concurrency;
+    }
+    if cli_has(&["--tls-session-cache"]) {
+        cfg.tls_session_cache = st.tls_session_cache;
+    }
     cfg.grace_seconds = cli.global.grace_seconds;
 
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--url" || a.starts_with("--url=")) {
+    if cli_has(&["--url"]) {
         cfg.speedtest_url_path = st.url_path.clone();
     }
 
