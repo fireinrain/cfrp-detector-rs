@@ -624,13 +624,25 @@ open tcp 8443 104.17.200.10 1710000001
 
     #[test]
     fn scanner_resolve_masscan_prefers_local_binary_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom_bin = dir.path().join("custom-masscan");
+        // resolve_masscan_cmd 内部会检查 p.exists(); 必须先创建假文件, 否则路径分支被跳过
+        std::fs::write(&custom_bin, "#!/bin/sh\necho fake").unwrap();
+        // 赋予可执行权限 (非必须, exists() 只看存在性; 但让语义更贴近真实使用)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&custom_bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&custom_bin, perms).ok();
+        }
         let cfg = MasscanConfig {
-            masscan_binary_path: Some(PathBuf::from("/usr/local/bin/masscan")),
+            masscan_binary_path: Some(custom_bin.clone()),
             ..MasscanConfig::new()
         };
         let s = MasscanScanner::new(cfg);
         let path = s.resolve_masscan_cmd();
-        assert_eq!(path, PathBuf::from("/usr/local/bin/masscan"));
+        assert_eq!(path, custom_bin);
     }
 
     #[test]
@@ -817,11 +829,25 @@ open tcp 8443 104.17.200.10 1710000001
             ..MasscanConfig::new()
         };
         let s = MasscanScanner::new(cfg);
-        let iface = s.resolve_interface().unwrap();
-        #[cfg(target_os = "linux")]
-        assert!(!iface.is_empty());
-        #[cfg(not(target_os = "linux"))]
-        assert_eq!(iface, "default");
+        let ifaces = MasscanScanner::list_interfaces().unwrap();
+        // 行为取决于系统网卡数 (CI 容器通常多网卡, 本地开发机常只有 1 个 default)
+        match ifaces.len() {
+            0 => panic!("list_interfaces 返回 0 个网卡, 不符合任何预期分支"),
+            1 => {
+                // 单网卡: 应回退到该网卡 (Linux 下为真实名字, 非 Linux 为 "default")
+                let iface = s.resolve_interface().unwrap();
+                assert!(!iface.is_empty());
+            }
+            _ => {
+                // 多网卡: 按设计应该报错 (要求用户显式指定)
+                let err = s.resolve_interface().expect_err("多网卡时应返回错误, 要求用户选择 interface");
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("multiple network interfaces"),
+                    "错误消息应指出多网卡冲突, 实际: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
