@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use cfrp_detector::{
     AdaptiveConfig, BatchProgress, BatchTarget, Confidence, Detector, DetectorConfig,
-    MasscanConfig, MasscanPipeline, MasscanScanner, PipelineAsnTask, PipelineOptions, Target,
-    SpeedTestConfig, SpeedTester,
+    MasscanConfig, MasscanPipeline, MasscanScanner, PipelineAsnTask, PipelineOptions,
+    SpeedTestConfig, SpeedTester, Target,
 };
 use clap::{Parser, Subcommand};
-use figment::{Figment, providers::{Env, Format, Toml, Serialized}};
+use figment::{
+    Figment,
+    providers::{Env, Format, Serialized, Toml},
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -103,18 +106,42 @@ pub struct ConfigFile {
     pub grace_seconds: u64,
 }
 
-fn cf_concurrency() -> usize { 10 }
-fn cf_a_min() -> usize { 1 }
-fn cf_a_max() -> usize { 128 }
-fn cf_a_initial() -> usize { 16 }
-fn cf_a_window() -> usize { 10 }
-fn cf_speedtest_url_path() -> String { "/cdn-cgi/trace".into() }
-fn cf_speedtest_threads() -> usize { 3 }
-fn cf_speedtest_timeout_secs() -> u64 { 5 }
-fn cf_speedtest_concurrency() -> usize { 8 }
-fn cf_probe_timeout_secs() -> u64 { 3 }
-fn cf_tls_session_cache() -> usize { 256 }
-fn cf_grace_seconds() -> u64 { 30 }
+fn cf_concurrency() -> usize {
+    10
+}
+fn cf_a_min() -> usize {
+    1
+}
+fn cf_a_max() -> usize {
+    128
+}
+fn cf_a_initial() -> usize {
+    16
+}
+fn cf_a_window() -> usize {
+    10
+}
+fn cf_speedtest_url_path() -> String {
+    "/cdn-cgi/trace".into()
+}
+fn cf_speedtest_threads() -> usize {
+    3
+}
+fn cf_speedtest_timeout_secs() -> u64 {
+    5
+}
+fn cf_speedtest_concurrency() -> usize {
+    8
+}
+fn cf_probe_timeout_secs() -> u64 {
+    3
+}
+fn cf_tls_session_cache() -> usize {
+    256
+}
+fn cf_grace_seconds() -> u64 {
+    30
+}
 
 impl Default for ConfigFile {
     fn default() -> Self {
@@ -162,7 +189,12 @@ enum MasscanCmd {
     },
     #[command(name = "batch-asn", about = "Scan multiple ASNs from a list file")]
     BatchAsn {
-        #[arg(short = 'f', long = "file", default_value = "as.txt", help = "ASN list file, format ASN:PORT:TLS per line")]
+        #[arg(
+            short = 'f',
+            long = "file",
+            default_value = "as.txt",
+            help = "ASN list file, format ASN:PORT:TLS per line"
+        )]
         filename: PathBuf,
     },
     #[command(name = "single-ip", about = "Scan a single IP address")]
@@ -176,14 +208,22 @@ enum MasscanCmd {
     },
     #[command(name = "batch-ip", about = "Scan multiple IPs from a list file")]
     BatchIp {
-        #[arg(short = 'f', long = "file", default_value = "ips.txt", help = "IP list file, one IP per line")]
+        #[arg(
+            short = 'f',
+            long = "file",
+            default_value = "ips.txt",
+            help = "IP list file, one IP per line"
+        )]
         filename: PathBuf,
         #[arg(long, help = "Enable TLS (default: yes)")]
         tls: Option<bool>,
         #[arg(long, help = "Ports to scan, e.g. 1-65535")]
         port: Option<String>,
     },
-    #[command(name = "clear-cache", about = "Clear ASN cache, interface setting, and temp files")]
+    #[command(
+        name = "clear-cache",
+        about = "Clear ASN cache, interface setting, and temp files"
+    )]
     ClearCache,
 }
 
@@ -209,7 +249,11 @@ struct Cli {
     )]
     grace_seconds: u64,
 
-    #[arg(short, long, help = "Hostname / SNI used for probing (e.g. example.com)")]
+    #[arg(
+        short,
+        long,
+        help = "Hostname / SNI used for probing (e.g. example.com)"
+    )]
     domain: Option<String>,
 
     #[arg(
@@ -244,22 +288,46 @@ struct Cli {
     )]
     concurrency: usize,
 
-    #[arg(short = 'a', long = "adaptive", help = "Enable adaptive concurrency governor")]
+    #[arg(
+        short = 'a',
+        long = "adaptive",
+        help = "Enable adaptive concurrency governor"
+    )]
     adaptive: bool,
 
-    #[arg(long = "a-min", default_value_t = 1, help = "Adaptive: minimum concurrency")]
+    #[arg(
+        long = "a-min",
+        default_value_t = 1,
+        help = "Adaptive: minimum concurrency"
+    )]
     a_min: usize,
 
-    #[arg(long = "a-max", default_value_t = 128, help = "Adaptive: maximum concurrency")]
+    #[arg(
+        long = "a-max",
+        default_value_t = 128,
+        help = "Adaptive: maximum concurrency"
+    )]
     a_max: usize,
 
-    #[arg(long = "a-initial", default_value_t = 16, help = "Adaptive: starting concurrency")]
+    #[arg(
+        long = "a-initial",
+        default_value_t = 16,
+        help = "Adaptive: starting concurrency"
+    )]
     a_initial: usize,
 
-    #[arg(long = "a-window", default_value_t = 10, help = "Adaptive: sliding window of recent probes")]
+    #[arg(
+        long = "a-window",
+        default_value_t = 10,
+        help = "Adaptive: sliding window of recent probes"
+    )]
     a_window: usize,
 
-    #[arg(short = 'p', long = "progress", help = "Show an interactive progress bar on stderr")]
+    #[arg(
+        short = 'p',
+        long = "progress",
+        help = "Show an interactive progress bar on stderr"
+    )]
     progress: bool,
 
     #[arg(
@@ -392,7 +460,10 @@ struct Cli {
     #[command(subcommand)]
     masscan: Option<MasscanCmd>,
 
-    #[arg(value_name = "TARGET", help = "Targets in form ip[:port] or [ipv6]:port")]
+    #[arg(
+        value_name = "TARGET",
+        help = "Targets in form ip[:port] or [ipv6]:port"
+    )]
     targets: Vec<String>,
 }
 
@@ -440,7 +511,8 @@ impl ExportRecord {
             region: edge.and_then(|x| x.region.clone()),
             city: edge.and_then(|x| x.city.clone()),
             latency_ms: edge.and_then(|x| x.latency.map(|d| d.as_millis())),
-            download_speed_bytes_per_sec: speed_bps.or_else(|| edge.and_then(|x| x.download_speed_bytes_per_sec)),
+            download_speed_bytes_per_sec: speed_bps
+                .or_else(|| edge.and_then(|x| x.download_speed_bytes_per_sec)),
             confidence: r
                 .map(|x| format!("{:?}", x.confidence))
                 .unwrap_or_else(|| format!("{:?}", Confidence::None)),
@@ -517,7 +589,7 @@ struct InProcessBaselineSuite {
 
 fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
     use cfrp_detector::governor::{
-        classify_resource_error, MockFdCounter, ResourceGovernor, ResourceGovernorConfig,
+        MockFdCounter, ResourceGovernor, ResourceGovernorConfig, classify_resource_error,
     };
     use cfrp_detector::{ConnectorConfig, DetectorConfig, PinnedConnector, ProbeConfig};
     use std::time::{Instant, SystemTime};
@@ -536,8 +608,12 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
             let s = Instant::now();
             f();
             let d = s.elapsed().as_nanos();
-            if d < min { min = d; }
-            if d > max { max = d; }
+            if d < min {
+                min = d;
+            }
+            if d > max {
+                max = d;
+            }
         }
         let total_ns = total_start.elapsed().as_nanos();
         let avg = total_ns / iters.max(1) as u128;
@@ -568,13 +644,20 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
         );
         let mut extra = std::collections::HashMap::new();
         extra.insert("go_baseline_hint_ns".into(), "2500".into());
-        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/governor".into());
+        extra.insert(
+            "baseline_component".into(),
+            "go-cfrp-detector/pkg/governor".into(),
+        );
         results.push(InProcessBaselineResult {
             name: "governor.cap_concurrency".into(),
             avg_ns: avg,
             min_ns: min,
             max_ns: max,
-            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            ops_per_sec: if avg > 0 {
+                1_000_000_000.0 / avg as f64
+            } else {
+                0.0
+            },
             extra,
             ..Default::default()
         });
@@ -594,13 +677,20 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
         );
         let mut extra = std::collections::HashMap::new();
         extra.insert("go_baseline_hint_ns".into(), "180".into());
-        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/governor".into());
+        extra.insert(
+            "baseline_component".into(),
+            "go-cfrp-detector/pkg/governor".into(),
+        );
         results.push(InProcessBaselineResult {
             name: "governor.classify_resource_error_EMFILE".into(),
             avg_ns: avg,
             min_ns: min,
             max_ns: max,
-            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            ops_per_sec: if avg > 0 {
+                1_000_000_000.0 / avg as f64
+            } else {
+                0.0
+            },
             extra,
             ..Default::default()
         });
@@ -618,13 +708,20 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
         );
         let mut extra = std::collections::HashMap::new();
         extra.insert("go_baseline_hint_ns".into(), "450000".into());
-        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/connector".into());
+        extra.insert(
+            "baseline_component".into(),
+            "go-cfrp-detector/pkg/connector".into(),
+        );
         results.push(InProcessBaselineResult {
             name: "connector.PinnedConnector_new_default".into(),
             avg_ns: avg,
             min_ns: min,
             max_ns: max,
-            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            ops_per_sec: if avg > 0 {
+                1_000_000_000.0 / avg as f64
+            } else {
+                0.0
+            },
             extra,
             ..Default::default()
         });
@@ -643,13 +740,20 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
         );
         let mut extra = std::collections::HashMap::new();
         extra.insert("go_baseline_hint_ns".into(), "80".into());
-        extra.insert("baseline_component".into(), "go-cfrp-detector/internal/config".into());
+        extra.insert(
+            "baseline_component".into(),
+            "go-cfrp-detector/internal/config".into(),
+        );
         results.push(InProcessBaselineResult {
             name: "probe.ProbeConfig_to_pinned".into(),
             avg_ns: avg,
             min_ns: min,
             max_ns: max,
-            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            ops_per_sec: if avg > 0 {
+                1_000_000_000.0 / avg as f64
+            } else {
+                0.0
+            },
             extra,
             ..Default::default()
         });
@@ -668,13 +772,20 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
         );
         let mut extra = std::collections::HashMap::new();
         extra.insert("go_baseline_hint_ns".into(), "40".into());
-        extra.insert("baseline_component".into(), "go-cfrp-detector/pkg/detector".into());
+        extra.insert(
+            "baseline_component".into(),
+            "go-cfrp-detector/pkg/detector".into(),
+        );
         results.push(InProcessBaselineResult {
             name: "detector.DetectorConfig_default_clone".into(),
             avg_ns: avg,
             min_ns: min,
             max_ns: max,
-            ops_per_sec: if avg > 0 { 1_000_000_000.0 / avg as f64 } else { 0.0 },
+            ops_per_sec: if avg > 0 {
+                1_000_000_000.0 / avg as f64
+            } else {
+                0.0
+            },
             extra,
             ..Default::default()
         });
@@ -683,7 +794,11 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
     InProcessBaselineSuite {
         results,
         generated_at: now,
-        rust_version: Some(option_env!("RUSTC_VERSION").map(|v| format!("rustc {}", v)).unwrap_or_else(|| "rustc unknown".into())),
+        rust_version: Some(
+            option_env!("RUSTC_VERSION")
+                .map(|v| format!("rustc {}", v))
+                .unwrap_or_else(|| "rustc unknown".into()),
+        ),
         os: Some(std::env::consts::OS.into()),
         arch: Some(std::env::consts::ARCH.into()),
     }
@@ -699,7 +814,9 @@ fn merge_config(cli: &Cli) -> Result<ConfigFile> {
         fig = fig.admerge(Toml::file(path));
     }
     fig = fig.admerge(Env::prefixed("CFRP_").split("_").filter(|k| k != "TARGETS"));
-    let cfg: ConfigFile = fig.extract().context("merge env + config file into ConfigFile")?;
+    let cfg: ConfigFile = fig
+        .extract()
+        .context("merge env + config file into ConfigFile")?;
 
     let mut cli_targets: Vec<String> = cli.targets.clone();
     let mut merged = if cli.config.is_some() {
@@ -707,13 +824,24 @@ fn merge_config(cli: &Cli) -> Result<ConfigFile> {
         t.append(&mut cli_targets);
         ConfigFile { targets: t, ..cfg }
     } else {
-        ConfigFile { targets: cli_targets, ..cfg }
+        ConfigFile {
+            targets: cli_targets,
+            ..cfg
+        }
     };
 
-    if cli.domain.is_some() { merged.domain = cli.domain.clone(); }
-    if cli.input.is_some() { merged.input = cli.input.clone(); }
-    if cli.output.is_some() { merged.output = cli.output.clone(); }
-    if cli.format.is_some() { merged.format = cli.format; }
+    if cli.domain.is_some() {
+        merged.domain = cli.domain.clone();
+    }
+    if cli.input.is_some() {
+        merged.input = cli.input.clone();
+    }
+    if cli.output.is_some() {
+        merged.output = cli.output.clone();
+    }
+    if cli.format.is_some() {
+        merged.format = cli.format;
+    }
 
     let args = std::env::args().collect::<Vec<_>>();
 
@@ -738,20 +866,28 @@ fn merge_config(cli: &Cli) -> Result<ConfigFile> {
     merged.probe_timeout_secs = cli.probe_timeout_secs;
     merged.tls_session_cache = cli.tls_session_cache;
     merged.grace_seconds = cli.grace_seconds;
-    if args.iter().any(|a| a == "--speedtest-url" || a.starts_with("--speedtest-url=")) {
+    if args
+        .iter()
+        .any(|a| a == "--speedtest-url" || a.starts_with("--speedtest-url="))
+    {
         merged.speedtest_url_path = cli.speedtest_url_path.clone();
     }
 
     Ok(merged)
 }
 
-fn build_signals_token(grace_seconds: u64) -> (CancellationToken, std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>) {
+fn build_signals_token(
+    grace_seconds: u64,
+) -> (
+    CancellationToken,
+    std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
+) {
     let cancel = CancellationToken::new();
     let cancel_child = cancel.clone();
     let fut = async move {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut sigint = match signal(SignalKind::interrupt()) {
                 Ok(s) => s,
                 Err(_) => return false,
@@ -772,7 +908,9 @@ fn build_signals_token(grace_seconds: u64) -> (CancellationToken, std::pin::Pin<
             let mut ctrlc = tokio::signal::windows::ctrl_c().ok()?;
             ctrlc.recv().await?;
         }
-        eprintln!("[shutdown] signal received; cancelling new probes, waiting {grace_seconds}s grace period for in-flight work...");
+        eprintln!(
+            "[shutdown] signal received; cancelling new probes, waiting {grace_seconds}s grace period for in-flight work..."
+        );
         cancel_child.cancel();
         tokio::time::sleep(Duration::from_secs(grace_seconds)).await;
         true
@@ -793,7 +931,11 @@ fn build_masscan_scanner(cli: &Cli) -> MasscanScanner {
 fn build_pipeline_options(cli: &Cli, cfg_merged: &ConfigFile) -> PipelineOptions {
     PipelineOptions {
         domain: cfg_merged.domain.clone(),
-        concurrency: if cli.concurrency != 10 { cli.concurrency } else { cfg_merged.concurrency.max(100) },
+        concurrency: if cli.concurrency != 10 {
+            cli.concurrency
+        } else {
+            cfg_merged.concurrency.max(100)
+        },
         speedtest: cfg_merged.speedtest,
         speedtest_threads: cfg_merged.speedtest_threads,
         speedtest_url_path: cfg_merged.speedtest_url_path.clone(),
@@ -815,7 +957,11 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
             let asn_dir = cli.asn_cache_dir.clone();
             let setting = cli.iface_setting_file.clone();
             cfrp_detector::clear_cache(&asn_dir, &setting)?;
-            println!("masscan cache cleared: asn_dir={}, setting={}", asn_dir.display(), setting.display());
+            println!(
+                "masscan cache cleared: asn_dir={}, setting={}",
+                asn_dir.display(),
+                setting.display()
+            );
             return Ok(true);
         }
         MasscanCmd::SingleAsn { asn, tls, port } => {
@@ -846,7 +992,8 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
             if tasks_raw.is_empty() {
                 anyhow::bail!("no ASN tasks found in {}", filename.display());
             }
-            let tasks: Vec<PipelineAsnTask> = tasks_raw.into_iter().map(PipelineAsnTask::from).collect();
+            let tasks: Vec<PipelineAsnTask> =
+                tasks_raw.into_iter().map(PipelineAsnTask::from).collect();
             let scanner = build_masscan_scanner(cli);
             scanner.check_masscan_available()?;
             let pipeline = MasscanPipeline::new(build_pipeline_options(cli, cfg_merged));
@@ -863,7 +1010,11 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
                     o.output_path.display()
                 );
             }
-            println!("batch-asn finished {} tasks in {}s", result.outputs.len(), started.elapsed().as_secs());
+            println!(
+                "batch-asn finished {} tasks in {}s",
+                result.outputs.len(),
+                started.elapsed().as_secs()
+            );
             return Ok(true);
         }
         MasscanCmd::SingleIp { ip, tls, port } => {
@@ -890,7 +1041,11 @@ async fn run_masscan_subcommand(cli: &Cli, cfg_merged: &ConfigFile) -> Result<bo
             );
             return Ok(true);
         }
-        MasscanCmd::BatchIp { filename, tls, port } => {
+        MasscanCmd::BatchIp {
+            filename,
+            tls,
+            port,
+        } => {
             let ips = MasscanScanner::read_ip_list_file(filename)?;
             if ips.is_empty() {
                 anyhow::bail!("no IPs found in {}", filename.display());
@@ -949,7 +1104,11 @@ async fn main() -> Result<()> {
                     "SCENARIO", "AVG_NS", "GO_HINT_NS", "RATIO"
                 )?;
                 for r in &report.results {
-                    let go_hint = r.extra.get("go_baseline_hint_ns").and_then(|s| s.parse::<u128>().ok()).unwrap_or_default();
+                    let go_hint = r
+                        .extra
+                        .get("go_baseline_hint_ns")
+                        .and_then(|s| s.parse::<u128>().ok())
+                        .unwrap_or_default();
                     let ratio = if r.avg_ns > 0 && go_hint > 0 {
                         format!("{:.2}x", go_hint as f64 / r.avg_ns as f64)
                     } else {
@@ -968,12 +1127,17 @@ async fn main() -> Result<()> {
 
     let targets = collect_targets_from_merged(&cfg_merged)?;
     if targets.is_empty() {
-        anyhow::bail!("no targets supplied; pass positional TARGET, CFRP_TARGETS env, or use -i FILE");
+        anyhow::bail!(
+            "no targets supplied; pass positional TARGET, CFRP_TARGETS env, or use -i FILE"
+        );
     }
 
     if cfg_merged.fast {
         if targets.len() != 1 {
-            anyhow::bail!("--fast mode requires exactly one target (got {})", targets.len());
+            anyhow::bail!(
+                "--fast mode requires exactly one target (got {})",
+                targets.len()
+            );
         }
         let t = &targets[0];
         let result = Detector::detect_oneshot(t, cfg_merged.domain.as_deref())
@@ -997,7 +1161,9 @@ async fn main() -> Result<()> {
     cfg.probe.tls_session_cache_size = cfg_merged.tls_session_cache;
     cfg.probe.allow_0rtt_speedtest = cfg_merged.speedtest_0rtt;
     cfg.governor_enabled = !cfg_merged.no_governor;
-    cfg.governor.user_max_concurrency = cfg.max_concurrency.max(1);
+    let user_concurrency = cfg_merged.concurrency.max(1);
+    cfg.max_concurrency = user_concurrency;
+    cfg.governor.user_max_concurrency = user_concurrency;
     cfg.governor.fd_safety_headroom = (cfg_merged.tls_session_cache / 8).max(32);
     let connect_timeout = cfg.probe.connect_timeout;
     let detector = Detector::new(cfg).await.context("initialize detector")?;
@@ -1070,14 +1236,23 @@ async fn main() -> Result<()> {
     signal_handle.abort();
 
     if let Some(pb) = pb.as_ref() {
-        let done_count = results.iter().filter(|r| r.result.is_some() || r.error.is_some()).count();
+        let done_count = results
+            .iter()
+            .filter(|r| r.result.is_some() || r.error.is_some())
+            .count();
         let total = results.len();
-        let status_tag = if cancel.is_cancelled() { "cancelled" } else { "done" };
+        let status_tag = if cancel.is_cancelled() {
+            "cancelled"
+        } else {
+            "done"
+        };
         pb.finish_with_message(format!("{status_tag} {done_count}/{total}"));
     }
 
     let speed_cancel = cancel.clone();
-    let speed_bps_per_target: std::collections::HashMap<String, u64> = if cfg_merged.speedtest && !speed_cancel.is_cancelled() {
+    let speed_bps_per_target: std::collections::HashMap<String, u64> = if cfg_merged.speedtest
+        && !speed_cancel.is_cancelled()
+    {
         if let Some(bar) = pb.as_ref() {
             bar.reset();
             bar.set_length(results.len() as u64);
@@ -1114,7 +1289,10 @@ async fn main() -> Result<()> {
         conn_cfg.tls_session_cache_max_entries = session_cache;
         conn_cfg.tls_session_cache_size = session_cache;
         conn_cfg.enable_0rtt = enable_0rtt;
-        let conn = Arc::new(cfrp_detector::PinnedConnector::new(conn_cfg).context("build pinned connector for speedtest")?);
+        let conn = Arc::new(
+            cfrp_detector::PinnedConnector::new(conn_cfg)
+                .context("build pinned connector for speedtest")?,
+        );
         let stream = stream::iter(speed_targets.into_iter().enumerate())
             .map(|(i, target)| {
                 let cfg_inner = speed_cfg.clone();
@@ -1128,11 +1306,15 @@ async fn main() -> Result<()> {
                         return None;
                     }
                     let use_tls = target.port != 80;
-                    let tester = SpeedTester::with_connector(conn_c, use_tls, sni_c.clone(), sni_c.clone());
+                    let tester =
+                        SpeedTester::with_connector(conn_c, use_tls, sni_c.clone(), sni_c.clone());
                     if enable_0rtt {
                         tester.set_0rtt_enabled(true);
                     }
-                    let res = tester.test_with_warmup(&target, &path_c, &cfg_inner).await.ok();
+                    let res = tester
+                        .test_with_warmup(&target, &path_c, &cfg_inner)
+                        .await
+                        .ok();
                     if let Some(pb) = pb_opt {
                         pb.inc(1);
                     }
@@ -1169,11 +1351,17 @@ async fn main() -> Result<()> {
             let (_, snap) = gov.cap_concurrency(1);
             eprintln!(
                 "[governor] active={} fd_used={}/{} fd_budget={} fd_ratio={:.3} errors={}/{} cap_proposed→{} err_ratio={:.3} throttled_fd={} throttled_err={}",
-                snap.active, snap.fd_used, snap.fd_limit, snap.fd_budget, snap.fd_ratio,
-                snap.resource_errors, snap.resource_error_ratio,
+                snap.active,
+                snap.fd_used,
+                snap.fd_limit,
+                snap.fd_budget,
+                snap.fd_ratio,
+                snap.resource_errors,
+                snap.resource_error_ratio,
                 snap.capped_concurrency,
                 snap.resource_error_ratio,
-                snap.throttled_due_to_fd, snap.throttled_due_to_resource_errors,
+                snap.throttled_due_to_fd,
+                snap.throttled_due_to_resource_errors,
             );
         } else {
             eprintln!("[governor] governor_disabled_by_cli=true");
@@ -1190,42 +1378,65 @@ async fn main() -> Result<()> {
 }
 
 fn collect_targets_from_merged(cfg: &ConfigFile) -> Result<Vec<Target>> {
-    let mut all_targets = Vec::new();
-    all_targets.extend(cfg.targets.iter().cloned());
+    let mut targets = Vec::new();
     let default_port = 443;
+    for raw in &cfg.targets {
+        if let Some(t) = parse_target(raw, default_port)? {
+            targets.push(t);
+        }
+    }
     if let Some(input_path) = cfg.input.as_ref() {
-        let content = fs::read_to_string(input_path)
+        let data = fs::read_to_string(input_path)
             .with_context(|| format!("read input file {}", input_path.display()))?;
-        let trimmed = content.trim();
-        if trimmed.starts_with('[') {
-            let parsed: Vec<InputTarget> = serde_json::from_str(trimmed)
-                .with_context(|| format!("parse JSON array from {}", input_path.display()))?;
-            for it in parsed {
-                let ip = IpAddr::from_str(&it.ip)
-                    .with_context(|| format!("invalid ip {} in {}", it.ip, input_path.display()))?;
-                all_targets.push(if it.port == 0 {
-                    ip.to_string()
-                } else {
-                    format!("{}:{}", ip, it.port)
-                });
+        if input_path
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        {
+            let trimmed = data.trim();
+            if let Ok(items) = serde_json::from_str::<Vec<InputTarget>>(trimmed) {
+                for x in items {
+                    let ip = IpAddr::from_str(&x.ip)
+                        .with_context(|| format!("invalid ip {} in {}", x.ip, input_path.display()))?;
+                    targets.push(Target::new(ip, x.port));
+                }
+            } else if let Ok(items) = serde_json::from_str::<Vec<String>>(trimmed) {
+                for x in items {
+                    if let Some(t) = parse_target(&x, default_port)? {
+                        targets.push(t);
+                    }
+                }
+            } else {
+                anyhow::bail!("invalid JSON input format in {}", input_path.display());
+            }
+        } else if input_path
+            .extension()
+            .and_then(|x| x.to_str())
+            .is_some_and(|x| x.eq_ignore_ascii_case("csv"))
+        {
+            let mut rdr = csv::Reader::from_reader(data.as_bytes());
+            for (i, row) in rdr.deserialize().enumerate() {
+                let r: CsvInputRow = match row {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("skip csv row {}: {}", i, e);
+                        continue;
+                    }
+                };
+                let ip = IpAddr::from_str(&r.ip).with_context(|| format!("csv row {} invalid ip", i))?;
+                let port = r.port.unwrap_or(default_port);
+                targets.push(Target::new(ip, port));
             }
         } else {
-            for line in trimmed.lines() {
-                let line = line.split('#').next().unwrap_or("").trim();
-                if line.is_empty() {
-                    continue;
+            for line in data.lines() {
+                let s = line.split('#').next().unwrap_or(line).trim();
+                if let Some(t) = parse_target(s, default_port)? {
+                    targets.push(t);
                 }
-                all_targets.push(line.to_string());
             }
         }
     }
 
-    let mut targets = Vec::with_capacity(all_targets.len());
-    for raw in all_targets {
-        let t = cfrp_detector::parse_target(raw.trim(), default_port)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        targets.push(t);
-    }
     Ok(targets)
 }
 
@@ -1248,7 +1459,10 @@ fn infer_format(cfg: &ConfigFile) -> OutputFormat {
 fn emit_records(cfg: &ConfigFile, records: &[ExportRecord]) -> Result<()> {
     let fmt = infer_format(cfg);
     let mut sink: Box<dyn Write> = if let Some(path) = cfg.output.as_ref() {
-        Box::new(fs::File::create(path).with_context(|| format!("open output file {}", path.display()))?)
+        Box::new(
+            fs::File::create(path)
+                .with_context(|| format!("open output file {}", path.display()))?,
+        )
     } else {
         Box::new(std::io::stdout())
     };
@@ -1295,6 +1509,12 @@ struct CsvRow<'a> {
     error: &'a str,
 }
 
+#[derive(Debug, Deserialize)]
+struct CsvInputRow {
+    ip: String,
+    port: Option<u16>,
+}
+
 impl<'a> From<&'a ExportRecord> for CsvRow<'a> {
     fn from(r: &'a ExportRecord) -> Self {
         Self {
@@ -1317,69 +1537,6 @@ impl<'a> From<&'a ExportRecord> for CsvRow<'a> {
             error: r.error.as_deref().unwrap_or(""),
         }
     }
-}
-
-fn collect_targets(cli: &Cli) -> Result<Vec<Target>> {
-    let mut out = Vec::new();
-    for raw in &cli.targets {
-        if let Some(t) = parse_target(raw, 443)? {
-            out.push(t);
-        }
-    }
-    if let Some(path) = &cli.input {
-        let data = fs::read_to_string(path).with_context(|| format!("read input file {}", path.display()))?;
-        if path
-            .extension()
-            .and_then(|x| x.to_str())
-            .is_some_and(|x| x.eq_ignore_ascii_case("json"))
-        {
-            if let Ok(items) = serde_json::from_str::<Vec<InputTarget>>(&data) {
-                for x in items {
-                    out.push(Target::new(IpAddr::from_str(&x.ip)?, x.port));
-                }
-            } else if let Ok(items) = serde_json::from_str::<Vec<String>>(&data) {
-                for x in items {
-                    if let Some(t) = parse_target(&x, 443)? {
-                        out.push(t);
-                    }
-                }
-            } else {
-                anyhow::bail!("invalid JSON input format in {}", path.display());
-            }
-        } else if path
-            .extension()
-            .and_then(|x| x.to_str())
-            .is_some_and(|x| x.eq_ignore_ascii_case("csv"))
-        {
-            let mut rdr = csv::Reader::from_reader(data.as_bytes());
-            for (i, row) in rdr.deserialize().enumerate() {
-                let r: CsvInputRow = match row {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("skip csv row {}: {}", i, e);
-                        continue;
-                    }
-                };
-                let ip = IpAddr::from_str(&r.ip).with_context(|| format!("csv row {} invalid ip", i))?;
-                let port = r.port.unwrap_or(443);
-                out.push(Target::new(ip, port));
-            }
-        } else {
-            for line in data.lines() {
-                let s = line.split('#').next().unwrap_or(line).trim();
-                if let Some(t) = parse_target(s, 443)? {
-                    out.push(t);
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-#[derive(Debug, Deserialize)]
-struct CsvInputRow {
-    ip: String,
-    port: Option<u16>,
 }
 
 fn parse_target(raw: &str, default_port: u16) -> Result<Option<Target>> {
@@ -1415,12 +1572,22 @@ mod tests {
             cmd.clone().write_help(&mut buf).unwrap();
             String::from_utf8(buf).unwrap()
         };
-        assert!(help_text.contains("masscan"), "help should mention masscan subcommands");
+        assert!(
+            help_text.contains("masscan"),
+            "help should mention masscan subcommands"
+        );
     }
 
     #[test]
     fn cli_parse_masscan_clear_cache() {
-        let args = &["cfrp-detector", "--asn-cache-dir", "/tmp/asn", "--iface-setting-file", "/tmp/if.txt", "clear-cache"];
+        let args = &[
+            "cfrp-detector",
+            "--asn-cache-dir",
+            "/tmp/asn",
+            "--iface-setting-file",
+            "/tmp/if.txt",
+            "clear-cache",
+        ];
         let cli = Cli::try_parse_from(args).expect("parse clear-cache");
         let cmd = cli.masscan.as_ref().expect("has masscan sub");
         assert!(matches!(cmd, MasscanCmd::ClearCache));
@@ -1447,19 +1614,26 @@ mod tests {
     fn cli_parse_masscan_single_asn_explicit() {
         let args = &[
             "cfrp-detector",
-            "--rate", "50000",
-            "--concurrency", "300",
-            "--domain", "example.com",
+            "--rate",
+            "50000",
+            "--concurrency",
+            "300",
+            "--domain",
+            "example.com",
             "single-asn",
-            "--asn", "132203",
-            "--tls", "true",
-            "--port", "443,8443",
+            "--asn",
+            "132203",
+            "--tls",
+            "true",
+            "--port",
+            "443,8443",
         ];
         let cli = Cli::try_parse_from(args).expect("parse single-asn explicit");
         assert_eq!(cli.rate, 50000);
         assert_eq!(cli.concurrency, 300);
         assert_eq!(cli.domain.as_deref(), Some("example.com"));
-        let MasscanCmd::SingleAsn { asn, tls, port } = cli.masscan.as_ref().expect("has sub") else {
+        let MasscanCmd::SingleAsn { asn, tls, port } = cli.masscan.as_ref().expect("has sub")
+        else {
             unreachable!("expected SingleAsn variant");
         };
         assert_eq!(*asn, 132203);
@@ -1503,11 +1677,15 @@ mod tests {
     fn cli_parse_masscan_single_ip_explicit() {
         let args = &[
             "cfrp-detector",
-            "--interface", "eth1",
+            "--interface",
+            "eth1",
             "single-ip",
-            "--ip", "10.0.0.1",
-            "--tls", "false",
-            "--port", "80,8080",
+            "--ip",
+            "10.0.0.1",
+            "--tls",
+            "false",
+            "--port",
+            "80,8080",
         ];
         let cli = Cli::try_parse_from(args).expect("parse single-ip explicit");
         assert_eq!(cli.interface.as_deref(), Some("eth1"));
@@ -1523,17 +1701,30 @@ mod tests {
     fn cli_parse_masscan_batch_ip() {
         let args = &[
             "cfrp-detector",
-            "--output-dir", "/tmp/out",
-            "--masscan-bin", "/usr/local/bin/masscan",
+            "--output-dir",
+            "/tmp/out",
+            "--masscan-bin",
+            "/usr/local/bin/masscan",
             "batch-ip",
-            "-f", "my_ips.txt",
-            "--tls", "true",
-            "--port", "443",
+            "-f",
+            "my_ips.txt",
+            "--tls",
+            "true",
+            "--port",
+            "443",
         ];
         let cli = Cli::try_parse_from(args).expect("parse batch-ip");
         assert_eq!(cli.output_dir, PathBuf::from("/tmp/out"));
-        assert_eq!(cli.masscan_binary.as_deref(), Some(PathBuf::from("/usr/local/bin/masscan").as_path()));
-        let MasscanCmd::BatchIp { filename, tls, port } = cli.masscan.as_ref().expect("sub") else {
+        assert_eq!(
+            cli.masscan_binary.as_deref(),
+            Some(PathBuf::from("/usr/local/bin/masscan").as_path())
+        );
+        let MasscanCmd::BatchIp {
+            filename,
+            tls,
+            port,
+        } = cli.masscan.as_ref().expect("sub")
+        else {
             unreachable!("expected BatchIp variant");
         };
         assert_eq!(filename, &PathBuf::from("my_ips.txt"));
@@ -1545,7 +1736,12 @@ mod tests {
     fn cli_parse_masscan_batch_ip_default_file() {
         let args = &["cfrp-detector", "batch-ip"];
         let cli = Cli::try_parse_from(args).expect("parse batch-ip default");
-        let MasscanCmd::BatchIp { filename, tls, port } = cli.masscan.as_ref().expect("sub") else {
+        let MasscanCmd::BatchIp {
+            filename,
+            tls,
+            port,
+        } = cli.masscan.as_ref().expect("sub")
+        else {
             unreachable!("expected BatchIp variant");
         };
         assert_eq!(filename, &PathBuf::from("ips.txt"));
@@ -1557,11 +1753,16 @@ mod tests {
     fn build_masscan_scanner_preserves_flags() {
         let args = &[
             "cfrp-detector",
-            "--rate", "25000",
-            "--interface", "enp0s3",
-            "--asn-cache-dir", "/a/cache",
-            "--iface-setting-file", "/a/s.txt",
-            "--masscan-bin", "/bin/ms",
+            "--rate",
+            "25000",
+            "--interface",
+            "enp0s3",
+            "--asn-cache-dir",
+            "/a/cache",
+            "--iface-setting-file",
+            "/a/s.txt",
+            "--masscan-bin",
+            "/bin/ms",
             "single-asn",
         ];
         let cli = Cli::try_parse_from(args).unwrap();
@@ -1570,19 +1771,28 @@ mod tests {
         assert_eq!(scanner.cfg.interface.as_deref(), Some("enp0s3"));
         assert_eq!(scanner.cfg.asn_cache_dir, PathBuf::from("/a/cache"));
         assert_eq!(scanner.cfg.iface_setting_file, PathBuf::from("/a/s.txt"));
-        assert_eq!(scanner.cfg.masscan_binary_path.as_deref(), Some(PathBuf::from("/bin/ms").as_path()));
+        assert_eq!(
+            scanner.cfg.masscan_binary_path.as_deref(),
+            Some(PathBuf::from("/bin/ms").as_path())
+        );
     }
 
     #[test]
     fn build_pipeline_options_inherits_detection_flags() {
         let cli = Cli::try_parse_from(&[
             "cfrp-detector",
-            "--output-dir", "/tmp/outs",
-            "--timeout", "5",
-            "--tls-session-cache", "512",
-            "--a-min", "4",
-            "--a-max", "200",
-            "--concurrency", "150",
+            "--output-dir",
+            "/tmp/outs",
+            "--timeout",
+            "5",
+            "--tls-session-cache",
+            "512",
+            "--a-min",
+            "4",
+            "--a-max",
+            "200",
+            "--concurrency",
+            "150",
             "single-asn",
         ])
         .unwrap();
