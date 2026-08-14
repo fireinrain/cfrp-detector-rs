@@ -1,4 +1,4 @@
-use cfrp_detector::{CacheConfig, FileCache};
+use cfrp_detector::{CacheConfig, FileCache, RetryConfig};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -7,6 +7,8 @@ fn cache_config_new_path_and_age() {
     let cfg = CacheConfig {
         directory: PathBuf::from("/tmp/cfrp-test"),
         max_age: Duration::from_secs(3600),
+        retry: RetryConfig::default(),
+        retry_on_429: true,
     };
     assert_eq!(cfg.directory.to_str().unwrap(), "/tmp/cfrp-test");
     assert_eq!(cfg.max_age, Duration::from_secs(3600));
@@ -32,6 +34,8 @@ fn file_cache_accepts_cfg_ref() {
     let cfg = CacheConfig {
         directory: PathBuf::from("/tmp/should-not-be-created"),
         max_age: Duration::from_millis(10),
+        retry: RetryConfig::default(),
+        retry_on_429: true,
     };
     let cache = FileCache::new(cfg.clone());
     assert_eq!(cache.cfg.directory, cfg.directory);
@@ -51,6 +55,8 @@ fn zero_max_age_is_allowed() {
     let cfg = CacheConfig {
         directory: PathBuf::from("/tmp/cfrp-zero"),
         max_age: Duration::ZERO,
+        retry: RetryConfig::default(),
+        retry_on_429: false,
     };
     assert!(cfg.max_age.is_zero());
 }

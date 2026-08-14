@@ -20,11 +20,18 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+proptest = "1.11.0"
+rcgen = "0.14.9"
+hyper = { version = "1.11.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "http1"] }
+http-body-util = "0.1.5"
+bytes = "1.12.1"
 
 [[bench]]
 name = "performance"

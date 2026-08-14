@@ -14,6 +14,7 @@ use http::HeaderMap;
 use reqwest::{Client, ClientBuilder};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Default)]
 pub struct GovernorFeedback {
@@ -252,10 +253,7 @@ impl Detector {
         };
         let latency = started.elapsed();
         let body_str = String::from_utf8_lossy(&response.body);
-        let colo = body_str
-            .lines()
-            .find_map(|line| line.strip_prefix("colo="))
-            .map(str::to_string);
+        let colo = extract_colo_from_trace(&body_str);
         let Some(colo_code) = colo else {
             return Ok(None);
         };
@@ -280,6 +278,276 @@ impl Detector {
     ) -> Vec<BatchResult> {
         self.detect_batch_with_progress(targets, domain, concurrency, AdaptiveConfig::default(), |_| {})
             .await
+    }
+
+    pub async fn detect_batch_with_cancel<F>(
+        &self,
+        targets: &[BatchTarget],
+        domain: Option<&str>,
+        base_concurrency: usize,
+        adaptive: AdaptiveConfig,
+        cancel: CancellationToken,
+        mut on_progress: F,
+    ) -> Vec<BatchResult>
+    where
+        F: FnMut(BatchProgress) + Send,
+    {
+        use parking_lot::Mutex;
+        use std::collections::VecDeque;
+        use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+        let total = targets.len();
+        if total == 0 {
+            return Vec::new();
+        }
+        let max_limit = self.cfg.max_concurrency.max(1);
+        let initial_raw = if adaptive.enabled {
+            adaptive.initial.clamp(adaptive.min, adaptive.max).min(max_limit)
+        } else {
+            base_concurrency.clamp(1, max_limit)
+        };
+        let initial_limit = if let Some(gov) = self.governor.as_deref() {
+            let (capped, _) = gov.cap_concurrency(initial_raw);
+            capped
+        } else {
+            initial_raw
+        };
+        let current_limit: Arc<Mutex<usize>> = Arc::new(Mutex::new(initial_limit));
+        let last_gov_snap: Arc<Mutex<Option<GovernorSnapshot>>> = Arc::new(Mutex::new(None));
+        let sem = Arc::new(Semaphore::new(*current_limit.lock()));
+        let recent: Arc<Mutex<VecDeque<bool>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(adaptive.window.max(1))));
+        let completed = Arc::new(Mutex::new(0usize));
+        let domain_owned: Arc<str> = domain.unwrap_or("").into();
+        let gov_enabled = self.governor.is_some();
+        let cancelled_flag: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+
+        let shared_ranges = self.ranges.clone();
+        let shared_locations = self.locations.clone();
+        let shared_cfg = self.cfg.clone();
+        let shared_governor = self.governor.clone();
+        let shared_probe_engine = self.probe_engine.clone();
+
+        let tasks: Vec<_> = targets
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, item)| {
+                let target = item.target.clone();
+                let bt_id = item.id;
+                let domain_ref = domain_owned.clone();
+                let sem = sem.clone();
+                let completed_c = completed.clone();
+                let recent_c = recent.clone();
+                let adaptive_c = adaptive.clone();
+                let limit_c = current_limit.clone();
+                let gov_snap_c = last_gov_snap.clone();
+                let max_limit_c = max_limit;
+                let ranges = shared_ranges.clone();
+                let locations = shared_locations.clone();
+                let cfg = shared_cfg.clone();
+                let governor = shared_governor.clone();
+                let probe_engine = shared_probe_engine.clone();
+                let cancel = cancel.clone();
+                let cancelled_flag = cancelled_flag.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
+                            let prev = {
+                                let mut c = completed_c.lock();
+                                let p = *c;
+                                *c += 1;
+                                p
+                            };
+                            *cancelled_flag.lock() = true;
+                            return (prev, idx, bt_id, target, Err(DetectorError::Http("cancelled".into())));
+                        }
+                        permit = sem.clone().acquire_owned() => {
+                            let _permit: OwnedSemaphorePermit = match permit {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    let prev = {
+                                        let mut c = completed_c.lock();
+                                        let p = *c;
+                                        *c += 1;
+                                        p
+                                    };
+                                    return (prev, idx, bt_id, target, Err(DetectorError::Http("semaphore closed".into())));
+                                }
+                            };
+                            if cancel.is_cancelled() {
+                                let prev = {
+                                    let mut c = completed_c.lock();
+                                    let p = *c;
+                                    *c += 1;
+                                    p
+                                };
+                                *cancelled_flag.lock() = true;
+                                return (prev, idx, bt_id, target, Err(DetectorError::Http("cancelled".into())));
+                            }
+                            let dom = if domain_ref.is_empty() { None } else { Some(domain_ref.as_ref()) };
+                            let result = tokio::select! {
+                                r = detect_impl(&ranges, &locations, &cfg, &probe_engine, governor.as_deref(), &target, dom) => r,
+                                _ = cancel.cancelled() => {
+                                    *cancelled_flag.lock() = true;
+                                    Err(DetectorError::Http("cancelled".into()))
+                                }
+                            };
+                            let ok = result.is_ok();
+                            if gov_enabled {
+                                if let Err(ref e) = result {
+                                    let is_res = classify_resource_error(e);
+                                    if let Some(gov) = governor.as_deref() {
+                                        gov.record_outcome(is_res);
+                                    }
+                                } else if let Some(gov) = governor.as_deref() {
+                                    gov.record_outcome(false);
+                                }
+                            }
+                            drop(_permit);
+                            {
+                                let mut r = recent_c.lock();
+                                r.push_back(ok);
+                                if r.len() > adaptive_c.window.max(1) {
+                                    r.pop_front();
+                                }
+                            }
+                            let prev = {
+                                let mut c = completed_c.lock();
+                                let p = *c;
+                                *c += 1;
+                                p
+                            };
+                            if adaptive_c.enabled || gov_enabled {
+                                let r = recent_c.lock();
+                                let n = r.len();
+                                let mut proposed: usize = if adaptive_c.enabled && n >= adaptive_c.window.min(3) {
+                                    let successes = r.iter().filter(|&&x| x).count();
+                                    let rate = successes as f64 / n as f64;
+                                    let cur = *limit_c.lock();
+                                    let mut new_limit = cur;
+                                    if rate >= 0.85 {
+                                        new_limit = (cur as f64 * 1.25).ceil() as usize;
+                                    } else if rate <= 0.35 {
+                                        new_limit = (cur as f64 * 0.5).floor() as usize;
+                                    }
+                                    let clamp_lo = adaptive_c.min.max(1);
+                                    let clamp_hi = adaptive_c.max.min(max_limit_c);
+                                    new_limit.clamp(clamp_lo, clamp_hi).max(1)
+                                } else {
+                                    *limit_c.lock()
+                                };
+                                if !adaptive_c.enabled {
+                                    proposed = proposed.clamp(1, max_limit_c);
+                                }
+                                let (capped, snap) = if let Some(gov) = governor.as_deref() {
+                                    gov.cap_concurrency(proposed)
+                                } else {
+                                    (proposed.min(max_limit_c).max(1), Default::default())
+                                };
+                                {
+                                    let mut gs = gov_snap_c.lock();
+                                    *gs = Some(snap);
+                                }
+                                let mut limit = limit_c.lock();
+                                let new_limit = capped.max(1);
+                                if new_limit != *limit {
+                                    let delta = new_limit as isize - *limit as isize;
+                                    if delta > 0 {
+                                        sem.add_permits(delta as usize);
+                                    } else {
+                                        for _ in 0..(-delta) {
+                                            if let Ok(p) = sem.clone().try_acquire_owned() {
+                                                p.forget();
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    *limit = new_limit;
+                                }
+                            }
+                            (prev, idx, bt_id, target, result)
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let mut out: Vec<(usize, usize, Target, std::result::Result<DetectionResult, DetectorError>)> = Vec::with_capacity(total);
+        let mut last_reported = 0usize;
+        let mut cancelled_raised = false;
+        let mut result_by_idx: Vec<Option<(usize, Target, std::result::Result<DetectionResult, DetectorError>)>> =
+            (0..total).map(|_| None).collect();
+        for task in tasks {
+            if cancel.is_cancelled() && !cancelled_raised {
+                cancelled_raised = true;
+            }
+            let task_result = task.await;
+            match task_result {
+                Ok((order, idx, bt_id, tgt, result)) => {
+                    let ok = result.is_ok();
+                    let tgt_for_progress = tgt.clone();
+                    let result_normalized = match result {
+                        Err(DetectorError::Http(ref m)) if m == "cancelled" => {
+                            Err(DetectorError::Http("cancelled by shutdown".into()))
+                        }
+                        other => other,
+                    };
+                    let was_cancelled = matches!(result_normalized, Err(DetectorError::Http(ref m)) if m.contains("cancelled"));
+                    result_by_idx[idx] = Some((bt_id, tgt, result_normalized));
+                    let done_count = order + 1;
+                    if done_count > last_reported || done_count == total || cancelled_raised {
+                        last_reported = done_count;
+                        let limit = *current_limit.lock();
+                        let snap_guard = last_gov_snap.lock();
+                        let (throttled, feedback) = if let Some(s) = snap_guard.as_ref() {
+                            (
+                                s.throttled_due_to_fd || s.throttled_due_to_resource_errors,
+                                GovernorFeedback { snapshot: Some(s.clone()) },
+                            )
+                        } else {
+                            (false, GovernorFeedback::default())
+                        };
+                        on_progress(BatchProgress {
+                            completed: done_count.min(total),
+                            total,
+                            current_concurrency: limit,
+                            last_success: ok && !was_cancelled,
+                            last_target: Some(tgt_for_progress),
+                            throttled_due_to_fd: throttled,
+                            governor_feedback: feedback,
+                        });
+                    }
+                }
+                Err(join_err) => {
+                    tracing::warn!("detect task join error: {}", join_err);
+                }
+            }
+        }
+        // Always produce exactly `total` results; gap-fill any missing (e.g. join error) with cancelled placeholder.
+        for (idx, slot) in result_by_idx.into_iter().enumerate() {
+            let bt = &targets[idx];
+            match slot {
+                Some((bt_id, tgt, result)) => out.push((idx, bt_id, tgt, result)),
+                None => out.push((
+                    idx,
+                    bt.id,
+                    bt.target.clone(),
+                    Err(DetectorError::Http("cancelled by shutdown (gap fill)".into())),
+                )),
+            }
+        }
+
+        out.sort_by_key(|(i, _, _, _)| *i);
+        out.into_iter()
+            .map(|(_, bt_id, target, result)| BatchResult {
+                id: bt_id,
+                target,
+                result: result.as_ref().ok().cloned(),
+                error: result.err().map(|e| e.to_string()),
+            })
+            .collect()
     }
 
     pub async fn detect_oneshot(
@@ -602,10 +870,7 @@ async fn detect_impl(
         };
         let latency = started.elapsed();
         let body_str = String::from_utf8_lossy(&response.body);
-        let colo = body_str
-            .lines()
-            .find_map(|line| line.strip_prefix("colo="))
-            .map(str::to_string);
+        let colo = extract_colo_from_trace(&body_str);
         if let Some(colo_code) = colo {
             let mut info = EdgeInfo {
                 colo_code: Some(colo_code.clone()),
@@ -623,11 +888,26 @@ async fn detect_impl(
     Ok(result)
 }
 
+pub(crate) fn extract_colo_from_trace(body: &str) -> Option<String> {
+    for raw_line in body.lines() {
+        let line = raw_line.trim();
+        if let Some(rest) = line.strip_prefix("colo=") {
+            let trimmed = rest.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            return Some(trimmed.to_ascii_uppercase());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::location::LocationSource;
     use crate::model::{Confidence, DetectionResult, EdgeInfo, Target};
+    use proptest::prelude::*;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::time::Duration;
@@ -750,5 +1030,53 @@ mod tests {
         let t = Target::new(ip, 443);
         assert_eq!(t.port, 443);
         assert_eq!(t.ip, ip);
+    }
+
+    #[test]
+    fn extract_colo_happy_path() {
+        let body = "fl=42\nh=www.cloudflare.com\ncolo=LAX\nloc=US\nsni=plaintext\n";
+        assert_eq!(extract_colo_from_trace(body).as_deref(), Some("LAX"));
+    }
+
+    #[test]
+    fn extract_colo_case_and_ws_insensitive() {
+        assert_eq!(extract_colo_from_trace("  colo=lax  \n").as_deref(), Some("LAX"));
+        assert_eq!(extract_colo_from_trace("\ncolo=NRT\n").as_deref(), Some("NRT"));
+        assert_eq!(extract_colo_from_trace("foo=bar\r\ncolo=  lax  \r\n").as_deref(), Some("LAX"));
+    }
+
+    #[test]
+    fn extract_colo_missing_or_empty_returns_none() {
+        assert_eq!(extract_colo_from_trace(""), None);
+        assert_eq!(extract_colo_from_trace("foo=bar\nbar=baz\n"), None);
+        assert_eq!(extract_colo_from_trace("colo=\n"), None);
+        assert_eq!(extract_colo_from_trace("colo=   \n"), None);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_extract_colo_never_panics(
+            lines in prop::collection::vec(
+                "[[:print:]]{0,80}",
+                0..20
+            )
+        ) {
+            let body = lines.join("\n");
+            let _ = extract_colo_from_trace(&body);
+        }
+
+        #[test]
+        fn prop_extract_colo_uppercase_roundtrip(
+            prefix in prop::collection::vec("[[:print:]]{0,40}", 0..5),
+            colo in "[A-Za-z]{2,6}",
+            suffix in prop::collection::vec("[[:print:]]{0,40}", 0..5)
+        ) {
+            let prefix_str = prefix.join("\n");
+            let suffix_str = suffix.join("\n");
+            let body = format!("{}\ncolo={}\n{}", prefix_str, colo, suffix_str);
+            let result = extract_colo_from_trace(&body);
+            prop_assert!(result.is_some());
+            prop_assert_eq!(result.unwrap(), colo.to_ascii_uppercase());
+        }
     }
 }

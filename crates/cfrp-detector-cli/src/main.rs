@@ -4,6 +4,7 @@ use cfrp_detector::{
     DetectorConfig, SpeedTestConfig, SpeedTester, Target,
 };
 use clap::Parser;
+use figment::{Figment, providers::{Env, Format, Toml, Serialized}};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,6 +16,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -36,6 +38,116 @@ impl FromStr for OutputFormat {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigFile {
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub input: Option<PathBuf>,
+    #[serde(default)]
+    pub output: Option<PathBuf>,
+    #[serde(default)]
+    pub format: Option<OutputFormat>,
+
+    #[serde(default)]
+    pub targets: Vec<String>,
+
+    #[serde(default = "cf_concurrency")]
+    pub concurrency: usize,
+
+    #[serde(default)]
+    pub adaptive: bool,
+    #[serde(default = "cf_a_min")]
+    pub a_min: usize,
+    #[serde(default = "cf_a_max")]
+    pub a_max: usize,
+    #[serde(default = "cf_a_initial")]
+    pub a_initial: usize,
+    #[serde(default = "cf_a_window")]
+    pub a_window: usize,
+
+    #[serde(default)]
+    pub progress: bool,
+    #[serde(default)]
+    pub speedtest: bool,
+    #[serde(default = "cf_speedtest_url_path")]
+    pub speedtest_url_path: String,
+    #[serde(default = "cf_speedtest_threads")]
+    pub speedtest_threads: usize,
+    #[serde(default = "cf_speedtest_timeout_secs")]
+    pub speedtest_timeout_secs: u64,
+    #[serde(default = "cf_speedtest_concurrency")]
+    pub speedtest_concurrency: usize,
+
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default = "cf_probe_timeout_secs")]
+    pub probe_timeout_secs: u64,
+    #[serde(default)]
+    pub governor_report: bool,
+    #[serde(default)]
+    pub no_governor: bool,
+    #[serde(default = "cf_tls_session_cache")]
+    pub tls_session_cache: usize,
+    #[serde(default)]
+    pub speedtest_0rtt: bool,
+
+    #[serde(default)]
+    pub bench: bool,
+    #[serde(default)]
+    pub bench_quick: bool,
+
+    #[serde(default = "cf_grace_seconds")]
+    pub grace_seconds: u64,
+}
+
+fn cf_concurrency() -> usize { 10 }
+fn cf_a_min() -> usize { 1 }
+fn cf_a_max() -> usize { 128 }
+fn cf_a_initial() -> usize { 16 }
+fn cf_a_window() -> usize { 10 }
+fn cf_speedtest_url_path() -> String { "/cdn-cgi/trace".into() }
+fn cf_speedtest_threads() -> usize { 3 }
+fn cf_speedtest_timeout_secs() -> u64 { 5 }
+fn cf_speedtest_concurrency() -> usize { 8 }
+fn cf_probe_timeout_secs() -> u64 { 3 }
+fn cf_tls_session_cache() -> usize { 256 }
+fn cf_grace_seconds() -> u64 { 30 }
+
+impl Default for ConfigFile {
+    fn default() -> Self {
+        Self {
+            domain: None,
+            input: None,
+            output: None,
+            format: None,
+            targets: Vec::new(),
+            concurrency: cf_concurrency(),
+            adaptive: false,
+            a_min: cf_a_min(),
+            a_max: cf_a_max(),
+            a_initial: cf_a_initial(),
+            a_window: cf_a_window(),
+            progress: false,
+            speedtest: false,
+            speedtest_url_path: cf_speedtest_url_path(),
+            speedtest_threads: cf_speedtest_threads(),
+            speedtest_timeout_secs: cf_speedtest_timeout_secs(),
+            speedtest_concurrency: cf_speedtest_concurrency(),
+            fast: false,
+            probe_timeout_secs: cf_probe_timeout_secs(),
+            governor_report: false,
+            no_governor: false,
+            tls_session_cache: cf_tls_session_cache(),
+            speedtest_0rtt: false,
+            bench: false,
+            bench_quick: false,
+            grace_seconds: cf_grace_seconds(),
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "cfrp-detector",
@@ -43,6 +155,21 @@ impl FromStr for OutputFormat {
     about = "Cloudflare edge detector and network quality probe (Go-compatible CLI)"
 )]
 struct Cli {
+    #[arg(
+        short = 'C',
+        long = "config",
+        value_name = "FILE",
+        help = "TOML configuration file. Env vars override config file values, CLI flags override env vars"
+    )]
+    config: Option<PathBuf>,
+
+    #[arg(
+        long = "grace-seconds",
+        default_value_t = 30,
+        help = "Grace period after SIGINT/SIGTERM to let in-flight probes finish before emitting partial results"
+    )]
+    grace_seconds: u64,
+
     #[arg(short, long, help = "Hostname / SNI used for probing (e.g. example.com)")]
     domain: Option<String>,
 
@@ -479,6 +606,97 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
     }
 }
 
+fn merge_config(cli: &Cli) -> Result<ConfigFile> {
+    let defaults = ConfigFile::default();
+    let mut fig = Figment::from(Serialized::defaults(&defaults));
+    if let Some(path) = cli.config.as_ref() {
+        if !path.exists() {
+            anyhow::bail!("config file not found: {}", path.display());
+        }
+        fig = fig.admerge(Toml::file(path));
+    }
+    fig = fig.admerge(Env::prefixed("CFRP_").split("_").filter(|k| k != "TARGETS"));
+    let cfg: ConfigFile = fig.extract().context("merge env + config file into ConfigFile")?;
+
+    let mut cli_targets: Vec<String> = cli.targets.clone();
+    let mut merged = if cli.config.is_some() {
+        let mut t = cfg.targets.clone();
+        t.append(&mut cli_targets);
+        ConfigFile { targets: t, ..cfg }
+    } else {
+        ConfigFile { targets: cli_targets, ..cfg }
+    };
+
+    if cli.domain.is_some() { merged.domain = cli.domain.clone(); }
+    if cli.input.is_some() { merged.input = cli.input.clone(); }
+    if cli.output.is_some() { merged.output = cli.output.clone(); }
+    if cli.format.is_some() { merged.format = cli.format; }
+
+    let args = std::env::args().collect::<Vec<_>>();
+
+    merged.adaptive = merged.adaptive || cli.adaptive;
+    merged.fast = merged.fast || cli.fast;
+    merged.speedtest = merged.speedtest || cli.speedtest;
+    merged.progress = merged.progress || cli.progress;
+    merged.governor_report = merged.governor_report || cli.governor_report;
+    merged.no_governor = merged.no_governor || cli.no_governor;
+    merged.speedtest_0rtt = merged.speedtest_0rtt || cli.speedtest_0rtt;
+    merged.bench = merged.bench || cli.bench;
+    merged.bench_quick = merged.bench_quick || cli.bench_quick;
+
+    merged.concurrency = cli.concurrency;
+    merged.a_min = cli.a_min;
+    merged.a_max = cli.a_max;
+    merged.a_initial = cli.a_initial;
+    merged.a_window = cli.a_window;
+    merged.speedtest_threads = cli.speedtest_threads;
+    merged.speedtest_timeout_secs = cli.speedtest_timeout_secs;
+    merged.speedtest_concurrency = cli.speedtest_concurrency;
+    merged.probe_timeout_secs = cli.probe_timeout_secs;
+    merged.tls_session_cache = cli.tls_session_cache;
+    merged.grace_seconds = cli.grace_seconds;
+    if args.iter().any(|a| a == "--speedtest-url" || a.starts_with("--speedtest-url=")) {
+        merged.speedtest_url_path = cli.speedtest_url_path.clone();
+    }
+
+    Ok(merged)
+}
+
+fn build_signals_token(grace_seconds: u64) -> (CancellationToken, std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>) {
+    let cancel = CancellationToken::new();
+    let cancel_child = cancel.clone();
+    let fut = async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            let mut sigterm = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+                _ = cancel_child.cancelled() => { return false; }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &cancel_child;
+            let mut ctrlc = tokio::signal::windows::ctrl_c().ok()?;
+            ctrlc.recv().await?;
+        }
+        eprintln!("[shutdown] signal received; cancelling new probes, waiting {grace_seconds}s grace period for in-flight work...");
+        cancel_child.cancel();
+        tokio::time::sleep(Duration::from_secs(grace_seconds)).await;
+        true
+    };
+    (cancel, Box::pin(fut))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -487,10 +705,11 @@ async fn main() -> Result<()> {
         .compact()
         .init();
     let cli = Cli::parse();
+    let cfg_merged = merge_config(&cli).context("merge layered config (file + env + cli)")?;
 
-    if cli.bench || cli.bench_quick {
-        let report = run_in_process_bench(cli.bench_quick);
-        match cli.format.unwrap_or(OutputFormat::Json) {
+    if cfg_merged.bench || cfg_merged.bench_quick {
+        let report = run_in_process_bench(cfg_merged.bench_quick);
+        match cfg_merged.format.unwrap_or(OutputFormat::Json) {
             OutputFormat::Json => {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
@@ -520,17 +739,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let targets = collect_targets(&cli)?;
+    let targets = collect_targets_from_merged(&cfg_merged)?;
     if targets.is_empty() {
-        anyhow::bail!("no targets supplied; pass positional TARGET or use -i FILE");
+        anyhow::bail!("no targets supplied; pass positional TARGET, CFRP_TARGETS env, or use -i FILE");
     }
 
-    if cli.fast {
+    if cfg_merged.fast {
         if targets.len() != 1 {
             anyhow::bail!("--fast mode requires exactly one target (got {})", targets.len());
         }
         let t = &targets[0];
-        let result = Detector::detect_oneshot(t, cli.domain.as_deref())
+        let result = Detector::detect_oneshot(t, cfg_merged.domain.as_deref())
             .await
             .context("one-shot detection failed")?;
         let br = cfrp_detector::BatchResult {
@@ -540,16 +759,19 @@ async fn main() -> Result<()> {
             error: None,
         };
         let records = vec![ExportRecord::build(&br, None)];
-        return emit_records(&cli, &records);
+        return emit_records(&cfg_merged, &records);
     }
 
+    let (cancel, signal_watch) = build_signals_token(cfg_merged.grace_seconds);
+    let signal_handle = tokio::spawn(signal_watch);
+
     let mut cfg = DetectorConfig::default();
-    cfg.probe.request_timeout = Duration::from_secs(cli.probe_timeout_secs);
-    cfg.probe.tls_session_cache_size = cli.tls_session_cache;
-    cfg.probe.allow_0rtt_speedtest = cli.speedtest_0rtt;
-    cfg.governor_enabled = !cli.no_governor;
+    cfg.probe.request_timeout = Duration::from_secs(cfg_merged.probe_timeout_secs);
+    cfg.probe.tls_session_cache_size = cfg_merged.tls_session_cache;
+    cfg.probe.allow_0rtt_speedtest = cfg_merged.speedtest_0rtt;
+    cfg.governor_enabled = !cfg_merged.no_governor;
     cfg.governor.user_max_concurrency = cfg.max_concurrency.max(1);
-    cfg.governor.fd_safety_headroom = (cli.tls_session_cache / 8).max(32);
+    cfg.governor.fd_safety_headroom = (cfg_merged.tls_session_cache / 8).max(32);
     let connect_timeout = cfg.probe.connect_timeout;
     let detector = Detector::new(cfg).await.context("initialize detector")?;
 
@@ -560,7 +782,7 @@ async fn main() -> Result<()> {
         .map(|(id, target)| BatchTarget { target, id })
         .collect();
 
-    let pb: Option<ProgressBar> = if cli.progress {
+    let pb: Option<ProgressBar> = if cfg_merged.progress {
         let bar = ProgressBar::new(batch.len() as u64);
         bar.set_style(
             ProgressStyle::with_template(
@@ -575,54 +797,71 @@ async fn main() -> Result<()> {
     };
 
     let adaptive_cfg = AdaptiveConfig {
-        enabled: cli.adaptive,
-        initial: cli.a_initial,
-        min: cli.a_min,
-        max: cli.a_max,
-        window: cli.a_window,
+        enabled: cfg_merged.adaptive,
+        initial: cfg_merged.a_initial,
+        min: cfg_merged.a_min,
+        max: cfg_merged.a_max,
+        window: cfg_merged.a_window,
     };
 
-    let results = if let Some(bar) = pb.as_ref() {
-        let bar_c = bar.clone();
-        detector
-            .detect_batch_with_progress(
-                &batch,
-                cli.domain.as_deref(),
-                cli.concurrency,
-                adaptive_cfg,
-                move |p: BatchProgress| {
-                    bar_c.set_position(p.completed as u64);
-                    bar_c.set_message(format!("{}", p.current_concurrency));
-                    if p.completed >= p.total {
-                        bar_c.finish_with_message("done");
-                    }
-                },
-            )
-            .await
-    } else {
-        detector
-            .detect_batch_with_progress(
-                &batch,
-                cli.domain.as_deref(),
-                cli.concurrency,
-                adaptive_cfg,
-                |_| {},
-            )
-            .await
+    let results = {
+        let cancel_b = cancel.clone();
+        let domain = cfg_merged.domain.clone();
+        let concurrency = cfg_merged.concurrency;
+        let pb_clone = pb.clone();
+        if let Some(bar) = pb_clone.as_ref() {
+            let bar_c = bar.clone();
+            detector
+                .detect_batch_with_cancel(
+                    &batch,
+                    domain.as_deref(),
+                    concurrency,
+                    adaptive_cfg,
+                    cancel_b,
+                    move |p: BatchProgress| {
+                        bar_c.set_position(p.completed as u64);
+                        bar_c.set_message(format!("{}", p.current_concurrency));
+                        if p.completed >= p.total {
+                            bar_c.finish_with_message("done");
+                        }
+                    },
+                )
+                .await
+        } else {
+            detector
+                .detect_batch_with_cancel(
+                    &batch,
+                    domain.as_deref(),
+                    concurrency,
+                    adaptive_cfg,
+                    cancel_b,
+                    |_| {},
+                )
+                .await
+        }
     };
+    signal_handle.abort();
 
-    let speed_bps_per_target: std::collections::HashMap<String, u64> = if cli.speedtest {
+    if let Some(pb) = pb.as_ref() {
+        let done_count = results.iter().filter(|r| r.result.is_some() || r.error.is_some()).count();
+        let total = results.len();
+        let status_tag = if cancel.is_cancelled() { "cancelled" } else { "done" };
+        pb.finish_with_message(format!("{status_tag} {done_count}/{total}"));
+    }
+
+    let speed_cancel = cancel.clone();
+    let speed_bps_per_target: std::collections::HashMap<String, u64> = if cfg_merged.speedtest && !speed_cancel.is_cancelled() {
         if let Some(bar) = pb.as_ref() {
             bar.reset();
             bar.set_length(results.len() as u64);
             bar.set_message("speedtest");
         }
         let speed_cfg = SpeedTestConfig {
-            timeout: Duration::from_secs(cli.speedtest_timeout_secs),
-            threads_per_target: cli.speedtest_threads.max(1),
-            concurrency: cli.speedtest_concurrency.max(1),
+            timeout: Duration::from_secs(cfg_merged.speedtest_timeout_secs),
+            threads_per_target: cfg_merged.speedtest_threads.max(1),
+            concurrency: cfg_merged.speedtest_concurrency.max(1),
         };
-        let domain = cli
+        let domain = cfg_merged
             .domain
             .clone()
             .unwrap_or_else(|| "www.cloudflare.com".to_string());
@@ -640,8 +879,8 @@ async fn main() -> Result<()> {
         let mut map = std::collections::HashMap::new();
         use futures::{StreamExt, stream};
         let host_owned = host.to_string();
-        let session_cache = cli.tls_session_cache.max(128);
-        let enable_0rtt = cli.speedtest_0rtt;
+        let session_cache = cfg_merged.tls_session_cache.max(128);
+        let enable_0rtt = cfg_merged.speedtest_0rtt;
         let mut conn_cfg = cfrp_detector::ConnectorConfig::default();
         conn_cfg.connect_timeout = connect_timeout;
         conn_cfg.request_timeout = speed_cfg.timeout;
@@ -655,8 +894,12 @@ async fn main() -> Result<()> {
                 let pb_opt = pb.clone();
                 let conn_c = conn.clone();
                 let sni_c = host_owned.clone();
-                let path_c = cli.speedtest_url_path.clone();
+                let path_c = cfg_merged.speedtest_url_path.clone();
+                let sc = speed_cancel.clone();
                 async move {
+                    if sc.is_cancelled() {
+                        return None;
+                    }
                     let use_tls = target.port != 80;
                     let tester = SpeedTester::with_connector(conn_c, use_tls, sni_c.clone(), sni_c.clone());
                     if enable_0rtt {
@@ -681,7 +924,7 @@ async fn main() -> Result<()> {
         if let Some(bar) = pb.as_ref() {
             bar.finish_with_message("speedtest done");
         }
-        if cli.governor_report {
+        if cfg_merged.governor_report {
             eprintln!(
                 "[speedtest] session_cache_len={} 0rtt_enabled={} targets_tested={}",
                 conn.tls_session_cache_len(),
@@ -694,7 +937,7 @@ async fn main() -> Result<()> {
         std::collections::HashMap::new()
     };
 
-    if cli.governor_report {
+    if cfg_merged.governor_report {
         if let Some(gov) = detector.governor() {
             let (_, snap) = gov.cap_concurrency(1);
             eprintln!(
@@ -716,14 +959,54 @@ async fn main() -> Result<()> {
         records.push(ExportRecord::build(br, bps));
     }
 
-    emit_records(&cli, &records)
+    emit_records(&cfg_merged, &records)
 }
 
-fn infer_format(cli: &Cli) -> OutputFormat {
-    if let Some(f) = cli.format {
+fn collect_targets_from_merged(cfg: &ConfigFile) -> Result<Vec<Target>> {
+    let mut all_targets = Vec::new();
+    all_targets.extend(cfg.targets.iter().cloned());
+    let default_port = 443;
+    if let Some(input_path) = cfg.input.as_ref() {
+        let content = fs::read_to_string(input_path)
+            .with_context(|| format!("read input file {}", input_path.display()))?;
+        let trimmed = content.trim();
+        if trimmed.starts_with('[') {
+            let parsed: Vec<InputTarget> = serde_json::from_str(trimmed)
+                .with_context(|| format!("parse JSON array from {}", input_path.display()))?;
+            for it in parsed {
+                let ip = IpAddr::from_str(&it.ip)
+                    .with_context(|| format!("invalid ip {} in {}", it.ip, input_path.display()))?;
+                all_targets.push(if it.port == 0 {
+                    ip.to_string()
+                } else {
+                    format!("{}:{}", ip, it.port)
+                });
+            }
+        } else {
+            for line in trimmed.lines() {
+                let line = line.split('#').next().unwrap_or("").trim();
+                if line.is_empty() {
+                    continue;
+                }
+                all_targets.push(line.to_string());
+            }
+        }
+    }
+
+    let mut targets = Vec::with_capacity(all_targets.len());
+    for raw in all_targets {
+        let t = cfrp_detector::parse_target(raw.trim(), default_port)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        targets.push(t);
+    }
+    Ok(targets)
+}
+
+fn infer_format(cfg: &ConfigFile) -> OutputFormat {
+    if let Some(f) = cfg.format {
         return f;
     }
-    if let Some(p) = cli.output.as_ref() {
+    if let Some(p) = cfg.output.as_ref() {
         if let Some(ext) = p.extension().and_then(|x| x.to_str()) {
             match ext.to_ascii_lowercase().as_str() {
                 "txt" | "text" => return OutputFormat::Txt,
@@ -735,9 +1018,9 @@ fn infer_format(cli: &Cli) -> OutputFormat {
     OutputFormat::Json
 }
 
-fn emit_records(cli: &Cli, records: &[ExportRecord]) -> Result<()> {
-    let fmt = infer_format(cli);
-    let mut sink: Box<dyn Write> = if let Some(path) = cli.output.as_ref() {
+fn emit_records(cfg: &ConfigFile, records: &[ExportRecord]) -> Result<()> {
+    let fmt = infer_format(cfg);
+    let mut sink: Box<dyn Write> = if let Some(path) = cfg.output.as_ref() {
         Box::new(fs::File::create(path).with_context(|| format!("open output file {}", path.display()))?)
     } else {
         Box::new(std::io::stdout())

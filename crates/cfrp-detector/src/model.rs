@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{fmt, net::IpAddr, time::Duration};
+use std::{fmt, net::{IpAddr, SocketAddr}, str::FromStr, time::Duration};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Target {
@@ -11,6 +11,40 @@ impl Target {
     pub fn new(ip: IpAddr, port: u16) -> Self {
         Self { ip, port }
     }
+}
+
+pub fn parse_target(s: &str, default_port: u16) -> Result<Target, String> {
+    if let Ok(addr) = SocketAddr::from_str(s) {
+        return Ok(Target::new(addr.ip(), addr.port()));
+    }
+    if let Ok(ip) = IpAddr::from_str(s) {
+        return Ok(Target::new(ip, default_port));
+    }
+    if s.starts_with('[') {
+        if let Some(close_idx) = s.find(']') {
+            let inner = &s[1..close_idx];
+            let rest = &s[close_idx + 1..];
+            if rest.is_empty() {
+                if let Ok(ip) = IpAddr::from_str(inner) {
+                    return Ok(Target::new(ip, default_port));
+                }
+            } else if let Some(rhs) = rest.strip_prefix(':') {
+                if let Ok(ip) = IpAddr::from_str(inner) {
+                    if let Ok(p) = rhs.parse::<u16>() {
+                        return Ok(Target::new(ip, p));
+                    }
+                }
+            }
+        }
+    }
+    if let Some((lhs, rhs)) = s.rsplit_once(':') {
+        if let Ok(p) = rhs.parse::<u16>() {
+            if let Ok(ip) = IpAddr::from_str(lhs) {
+                return Ok(Target::new(ip, p));
+            }
+        }
+    }
+    Err(format!("invalid target: {}", s))
 }
 
 impl fmt::Display for Target {
@@ -103,6 +137,7 @@ pub struct BatchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::Duration;
 
@@ -257,5 +292,85 @@ mod tests {
     fn protocol_serde_lowercase() {
         assert_eq!(serde_json::to_string(&Protocol::Http).unwrap(), "\"http\"");
         assert_eq!(serde_json::to_string(&Protocol::Https).unwrap(), "\"https\"");
+    }
+
+    proptest! {
+        #[test]
+        fn prop_target_roundtrip_v4(ip in any::<Ipv4Addr>(), port in any::<u16>()) {
+            let t = Target::new(IpAddr::V4(ip), port);
+            let s = format!("{}", t);
+            let t2 = parse_target(&s, 80).expect(&s);
+            prop_assert_eq!(t, t2);
+        }
+
+        #[test]
+        fn prop_target_roundtrip_v6(ip in any::<Ipv6Addr>(), port in any::<u16>()) {
+            let t = Target::new(IpAddr::V6(ip), port);
+            let s = format!("{}", t);
+            prop_assert!(s.starts_with('['), "IPv6 target display must bracket: {}", s);
+            let t2 = parse_target(&s, 80).expect(&s);
+            prop_assert_eq!(t, t2);
+        }
+
+        #[test]
+        fn prop_target_ip_only_uses_default_port(ip in any::<IpAddr>(), default_port in any::<u16>()) {
+            let s = match ip {
+                IpAddr::V6(_) => format!("[{}]", ip),
+                IpAddr::V4(_) => format!("{}", ip),
+            };
+            let t = parse_target(&s, default_port).unwrap();
+            prop_assert_eq!(t.port, default_port);
+            prop_assert_eq!(t.ip, ip);
+        }
+
+        #[test]
+        fn prop_batch_target_serde_roundtrip(ip in any::<Ipv4Addr>(), port in any::<u16>(), id in any::<usize>()) {
+            let bt = BatchTarget {
+                target: Target::new(IpAddr::V4(ip), port),
+                id,
+            };
+            let json = serde_json::to_string(&bt).unwrap();
+            let bt2: BatchTarget = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(bt.id, bt2.id);
+            prop_assert_eq!(bt.target, bt2.target);
+        }
+    }
+
+    #[test]
+    fn parse_target_happy_v4_with_port() {
+        let t = parse_target("1.2.3.4:8080", 443).unwrap();
+        assert_eq!(t.port, 8080);
+        assert_eq!(t.ip, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn parse_target_happy_v6_with_bracket() {
+        let t = parse_target("[::1]:8443", 443).unwrap();
+        assert_eq!(t.port, 8443);
+        assert_eq!(t.ip, IpAddr::V6(Ipv6Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn parse_target_rejects_garbage() {
+        assert!(parse_target("not an ip", 443).is_err());
+        assert!(parse_target("", 443).is_err());
+        assert!(parse_target(":::::", 443).is_err());
+        assert!(parse_target("1.2.3.4:99999", 443).is_err());
+    }
+
+    #[test]
+    fn parse_target_does_not_panic_on_arbitrary_bytes() {
+        let cases = [
+            "",
+            "::::::",
+            "[unclosed",
+            "999.999.999.999:-1",
+            "[::1]:bad",
+            "\x00\x01\x02",
+            "a]b:c",
+        ];
+        for c in cases {
+            let _ = parse_target(c, 443);
+        }
     }
 }

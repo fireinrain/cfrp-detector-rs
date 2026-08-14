@@ -165,6 +165,7 @@ impl Default for CloudflareRanges {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -269,5 +270,54 @@ mod tests {
     fn cidr_boundary_outside_prefix() {
         let r = CloudflareRanges::from(vec!["192.168.1.0/24".to_string()]);
         assert!(!r.contains(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 0))));
+    }
+
+    proptest! {
+        #[test]
+        fn prop_v4_zero_prefix_contains_all_ips(ip in any::<Ipv4Addr>()) {
+            let n = netip::IpNetLike::parse("0.0.0.0/0").unwrap();
+            prop_assert!(n.contains(IpAddr::V4(ip)));
+        }
+
+        #[test]
+        fn prop_v6_zero_prefix_contains_all_ips(ip in any::<Ipv6Addr>()) {
+            let n = netip::IpNetLike::parse("::/0").unwrap();
+            prop_assert!(n.contains(IpAddr::V6(ip)));
+        }
+
+        #[test]
+        fn prop_v4_self_32_contains_self(ip in any::<Ipv4Addr>()) {
+            let s = format!("{}/32", ip);
+            let n = netip::IpNetLike::parse(&s).unwrap();
+            prop_assert!(n.contains(IpAddr::V4(ip)));
+        }
+
+        #[test]
+        fn prop_v6_self_128_contains_self(ip in any::<Ipv6Addr>()) {
+            let s = format!("{}/128", ip);
+            let n = netip::IpNetLike::parse(&s).unwrap();
+            prop_assert!(n.contains(IpAddr::V6(ip)));
+        }
+
+        #[test]
+        fn prop_cidr_parse_does_not_panic(s in "\\PC*") {
+            let _ = netip::IpNetLike::parse(&s);
+        }
+
+        #[test]
+        fn prop_v4_24_boundary(a in 0u8..=255, b in 0u8..=255, c in 0u8..=255) {
+            let cidr = format!("{}.{}.{}.0/24", a, b, c);
+            let n = netip::IpNetLike::parse(&cidr).unwrap();
+            prop_assert!(n.contains(IpAddr::V4(Ipv4Addr::new(a, b, c, 0))));
+            prop_assert!(n.contains(IpAddr::V4(Ipv4Addr::new(a, b, c, 255))));
+            let outside = if c < 255 {
+                Ipv4Addr::new(a, b, c + 1, 0)
+            } else {
+                Ipv4Addr::new(a, b, 0, 0)
+            };
+            let outside_cidr = format!("{}.{}.{}.0/24", a, b, if c < 255 { c + 1 } else { 0 });
+            let n2 = netip::IpNetLike::parse(&outside_cidr).unwrap();
+            prop_assert!(n2.contains(IpAddr::V4(outside)));
+        }
     }
 }

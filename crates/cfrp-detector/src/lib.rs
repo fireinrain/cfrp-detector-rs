@@ -22,6 +22,6 @@ pub use detector::{AdaptiveConfig, BatchProgress, Detector, DetectorConfig, Gove
 pub use error::{DetectorError, Result, RetryConfig, is_retryable_error};
 pub use governor::{FdCounter, GovernorSnapshot, MockFdCounter, ResourceGovernor, ResourceGovernorConfig, ResourceKind, SystemFdCounter, classify_resource_error};
 pub use location::{CfLocation, LocationSource, LocationStore};
-pub use model::{BatchResult, BatchTarget, Confidence, DetectionResult, EdgeInfo, Protocol, Target};
+pub use model::{BatchResult, BatchTarget, Confidence, DetectionResult, EdgeInfo, Protocol, Target, parse_target};
 pub use probe::ProbeConfig;
 pub use speedtest::{SpeedTestConfig, SpeedTestResult, SpeedTester};
