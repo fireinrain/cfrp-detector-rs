@@ -1,4 +1,4 @@
-use crate::{DetectorError, Result};
+use crate::Result;
 use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime},

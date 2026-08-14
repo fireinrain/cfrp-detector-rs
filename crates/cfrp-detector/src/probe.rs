@@ -47,6 +47,7 @@ impl ProbeConfig {
 pub struct TlsProbe {
     pub working_sni: String,
     pub cloudflare_trait: bool,
+    #[allow(dead_code)]
     pub reason: Option<String>,
 }
 

@@ -7,7 +7,38 @@ use crate::{
     probe::{ProbeConfig, ProbeEngine},
 };
 use reqwest::{Client, ClientBuilder};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub struct BatchProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub current_concurrency: usize,
+    pub last_success: bool,
+    pub last_target: Option<Target>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdaptiveConfig {
+    pub enabled: bool,
+    pub initial: usize,
+    pub min: usize,
+    pub max: usize,
+    pub window: usize,
+}
+
+impl Default for AdaptiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            initial: 16,
+            min: 1,
+            max: 128,
+            window: 10,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DetectorConfig {
     pub probe: ProbeConfig,
@@ -26,6 +57,7 @@ impl Default for DetectorConfig {
 }
 
 pub struct Detector {
+    #[allow(dead_code)]
     client: Arc<Client>,
     ranges: Arc<CloudflareRanges>,
     locations: Arc<dyn LocationSource>,
@@ -213,21 +245,159 @@ impl Detector {
         domain: Option<&str>,
         concurrency: usize,
     ) -> Vec<BatchResult> {
-        use futures::{StreamExt, stream};
-        let limit = concurrency.clamp(1, self.cfg.max_concurrency.max(1));
-        let results = stream::iter(targets.iter().cloned().enumerate())
-            .map(|(idx, item)| async move {
+        self.detect_batch_with_progress(targets, domain, concurrency, AdaptiveConfig::default(), |_| {})
+            .await
+    }
+
+    pub async fn detect_oneshot(
+        target: &Target,
+        domain: Option<&str>,
+    ) -> Result<DetectionResult> {
+        let detector = Self::new(DetectorConfig::default()).await?;
+        detector.detect(target, domain).await
+    }
+
+    pub async fn detect_batch_with_progress<F>(
+        &self,
+        targets: &[BatchTarget],
+        domain: Option<&str>,
+        base_concurrency: usize,
+        adaptive: AdaptiveConfig,
+        mut on_progress: F,
+    ) -> Vec<BatchResult>
+    where
+        F: FnMut(BatchProgress) + Send,
+    {
+        use parking_lot::Mutex;
+        use std::collections::VecDeque;
+        use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+        let total = targets.len();
+        if total == 0 {
+            return Vec::new();
+        }
+        let max_limit = self.cfg.max_concurrency.max(1);
+        let current_limit: Arc<Mutex<usize>> = Arc::new(Mutex::new(if adaptive.enabled {
+            adaptive.initial.clamp(adaptive.min, adaptive.max).min(max_limit)
+        } else {
+            base_concurrency.clamp(1, max_limit)
+        }));
+        let sem = Arc::new(Semaphore::new(*current_limit.lock()));
+        let recent: Arc<Mutex<VecDeque<bool>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(adaptive.window.max(1))));
+        let completed = Arc::new(Mutex::new(0usize));
+        let domain_owned: Arc<str> = domain.unwrap_or("").into();
+
+        let tasks: Vec<_> = targets
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, item)| {
                 let target = item.target.clone();
-                let result = self.detect(&target, domain).await;
-                (idx, target, result)
+                let self_clone = unsafe {
+                    std::mem::transmute::<&Detector, &'static Detector>(self)
+                };
+                let domain_ref = domain_owned.clone();
+                let sem = sem.clone();
+                let completed_c = completed.clone();
+                let recent_c = recent.clone();
+                let adaptive_c = adaptive.clone();
+                let limit_c = current_limit.clone();
+                let max_limit_c = max_limit;
+                tokio::spawn(async move {
+                    let _permit: OwnedSemaphorePermit = match sem.clone().acquire_owned().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            let prev = {
+                                let mut c = completed_c.lock();
+                                let p = *c;
+                                *c += 1;
+                                p
+                            };
+                            return (prev, idx, target, Err(DetectorError::Http("semaphore closed".into())));
+                        }
+                    };
+                    let dom = if domain_ref.is_empty() { None } else { Some(domain_ref.as_ref()) };
+                    let result = self_clone.detect(&target, dom).await;
+                    let ok = result.is_ok();
+                    drop(_permit);
+                    {
+                        let mut r = recent_c.lock();
+                        r.push_back(ok);
+                        if r.len() > adaptive_c.window.max(1) {
+                            r.pop_front();
+                        }
+                    }
+                    let prev = {
+                        let mut c = completed_c.lock();
+                        let p = *c;
+                        *c += 1;
+                        p
+                    };
+                    if adaptive_c.enabled {
+                        let r = recent_c.lock();
+                        let n = r.len();
+                        if n >= adaptive_c.window.min(3) {
+                            let successes = r.iter().filter(|&&x| x).count();
+                            let rate = successes as f64 / n as f64;
+                            let mut limit = limit_c.lock();
+                            let mut new_limit = *limit;
+                            if rate >= 0.85 {
+                                new_limit = (*limit as f64 * 1.25).ceil() as usize;
+                            } else if rate <= 0.35 {
+                                new_limit = (*limit as f64 * 0.5).floor() as usize;
+                            }
+                            new_limit = new_limit.clamp(adaptive_c.min, adaptive_c.max).min(max_limit_c).max(1);
+                            if new_limit != *limit {
+                                let delta = new_limit as isize - *limit as isize;
+                                if delta > 0 {
+                                    sem.add_permits(delta as usize);
+                                } else {
+                                    for _ in 0..(-delta) {
+                                        if let Ok(p) = sem.clone().try_acquire_owned() {
+                                            p.forget();
+                                        } else {
+                                            break;
+                                        }
+                                    }
+                                }
+                                *limit = new_limit;
+                            }
+                        }
+                    }
+                    (prev, idx, target, result)
+                })
             })
-            .buffer_unordered(limit)
-            .collect::<Vec<_>>()
-            .await;
-        let mut ordered = results;
-        ordered.sort_by_key(|(idx, _, _)| *idx);
-        ordered
-            .into_iter()
+            .collect();
+
+        let mut out: Vec<(usize, Target, std::result::Result<DetectionResult, DetectorError>)> = Vec::with_capacity(total);
+        let mut last_reported = 0usize;
+        for task in tasks {
+            match task.await {
+                Ok((order, idx, tgt, result)) => {
+                    let ok = result.is_ok();
+                    out.push((idx, tgt, result));
+                    let done_count = order + 1;
+                    if done_count > last_reported || done_count == total {
+                        last_reported = done_count;
+                        let limit = *current_limit.lock();
+                        on_progress(BatchProgress {
+                            completed: done_count.min(total),
+                            total,
+                            current_concurrency: limit,
+                            last_success: ok,
+                            last_target: None,
+                        });
+                    }
+                }
+                Err(join_err) => {
+                    tracing::warn!("detect task join error: {}", join_err);
+                }
+            }
+        }
+
+        out.sort_by_key(|(i, _, _)| *i);
+        out.into_iter()
             .map(|(_, target, result)| BatchResult {
                 target,
                 result: result.as_ref().ok().cloned(),

@@ -15,7 +15,7 @@ mod speedtest;
 
 pub use cache::{CacheConfig, FileCache};
 pub use cidr::{CidrSource, CloudflareRanges};
-pub use detector::{Detector, DetectorConfig};
+pub use detector::{AdaptiveConfig, BatchProgress, Detector, DetectorConfig};
 pub use error::{DetectorError, Result};
 pub use location::{CfLocation, LocationSource,LocationStore};
 pub use model::{

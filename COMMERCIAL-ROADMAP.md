@@ -21,7 +21,6 @@
 - fast one-shot detector
 
 ## Phase 3 — performance
-- custom DNS/connector abstraction with connection pooling
 - direct IP pinning for speedtest while preserving SNI
 - reusable TLS sessions where safe
 - benchmark harness against the Go baseline
