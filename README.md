@@ -104,127 +104,181 @@ cargo bench -p cfrp-detector
 ### 命令总览
 
 ```
-cfrp-detector <全局选项> [TARGET...] [子命令]
+cfrp-detector <全局选项> [子命令]
 
 可用子命令:
-  single-asn   扫描单个 ASN 下所有 IP 段 (通过 masscan)
-  batch-asn    批量扫描多个 ASN (从任务文件读取)
-  single-ip    全端口扫描单个 IP (通过 masscan)
-  batch-ip     批量扫描多个 IP (从列表文件读取, 每行一个IP)
-  clear-cache  清除 ASN 缓存 / 网卡配置 / 临时文件
+  detect       直接探测目标 IP:Port 是否为 Cloudflare 边缘节点 (无需 masscan)
+  speedtest    对给定目标执行独立下载测速 (不做边缘识别)
+  scan         masscan 扫描 → 探测 → 可选测速 的一体化流水线 (需 masscan)
+    asn        扫描单个 ASN
+    asns       批量扫描多个 ASN (从任务文件读取)
+    ip         全端口扫描单个 IP
+    ips        批量扫描多个 IP (从列表文件读取)
+    clear-cache  清除 ASN 缓存 / 网卡配置 / 临时文件
   help         打印此帮助或子命令帮助
 ```
 
 ---
 
-### 1️⃣ 直接探测模式 (无需 masscan)
+### 1️⃣ `detect` — 直接探测模式 (无需 masscan)
 
 直接传入 `ip[:port]` 目标列表，立刻做 Cloudflare 边缘检测 + 质量评估：
 
 ```bash
 # 🌱 基础: 探测 3 个目标，并发 50，显示进度
-cfrp-detector --concurrency 50 --progress \
+cfrp-detector detect --concurrency 50 --progress \
     104.16.132.229:443  172.67.73.54:443  1.1.1.1:80
 
-# 📥 从 CSV 文件批量读目标 + 📤 输出 CSV 报告
-cfrp-detector \
+# 📥 从 CSV/JSON/TXT 文件批量读目标 + 📤 输出 CSV 报告
+cfrp-detector detect \
     --input  targets.csv \
     --output result.csv  \
     --format csv
 
-# 🚀 开启速度测试 + 自定义 SNI Host 域名
-cfrp-detector \
-    --speedtest  --speedtest-threads 8 \
+# 🚀 开启速度测试 (仅对确认是 Cloudflare edge 的目标测速) + 自定义 SNI Host 域名
+cfrp-detector detect \
+    --speed  --speedtest-threads 8 \
     --domain speed.cloudflare.com \
     -i ips.txt  -o result.json
 ```
 
 ---
 
-### 2️⃣ Masscan 扫描流水线 (需要 masscan + 高权限)
+### 2️⃣ `speedtest` — 独立测速模式
 
-#### `single-asn` — 扫描单个 ASN
-
-```bash
-# 扫描 AS45102 (阿里云), 默认 TLS + 443
-cfrp-detector --rate 50000 single-asn --asn 45102
-
-# 扫描 AS13335 (Cloudflare), 多端口 + HTTP (关闭 TLS)
-cfrp-detector single-asn --asn 13335 --tls false --port 80,443,8443
-```
-
-#### `batch-asn` — 批量 ASN 任务
-
-**`asn_tasks.csv` 格式** (每行: `ASN,PORT_RANGE,TLS_FLAG`)：
-```csv
-45102,443,true
-13335,"443,8443",true
-16509,80,false
-```
+对已知目标做纯下载测速（不做 CF 边缘判定，可直接用 `detect` 的输出文件作为输入）：
 
 ```bash
-cfrp-detector --concurrency 300 --rate 100000 batch-asn --file asn_tasks.csv
-```
+# 直接对指定目标测速 (SNI = speed.cloudflare.com, 显示进度)
+cfrp-detector speedtest 1.1.1.1:443 104.16.132.229:443 -d speed.cloudflare.com -p
 
-#### `single-ip` — 扫描单 IP 全端口
-
-```bash
-# 默认: IP=172.67.73.54, ports=1-65535, TLS=true
-cfrp-detector --rate 200000 single-ip
-
-# 显式指定
-cfrp-detector single-ip --ip 104.16.132.229 --port 80,443,8000-9000 --tls false
-```
-
-#### `batch-ip` — 批量 IP 列表
-
-```bash
-# my_ips.txt 每行一个 IP, 默认端口 1-65535
-cfrp-detector --rate 500000 batch-ip --file my_ips.txt --port 443 --tls true
-```
-
-#### `clear-cache` — 清理缓存
-
-```bash
-cfrp-detector \
-  --asn-cache-dir        ./asn_cache  \
-  --iface-setting-file   ./iface.txt  \
-  clear-cache
+# 读取 detect 输出做批量测速，输出 CSV
+cfrp-detector speedtest -i detect_results.json -o speeds.csv -f csv
 ```
 
 ---
 
-### 🎛️ 全局选项速查表
+### 3️⃣ `scan` — Masscan 扫描流水线 (需要 masscan + 高权限)
 
+#### `scan asn` — 扫描单个 ASN
+
+```bash
+# 扫描 AS13335 (Cloudflare), 默认端口 443 + TLS，探测后对 CF 边缘节点测速
+cfrp-detector scan asn 13335 --rate 50000 -s
+
+# 扫描 AS45102 (阿里云), 多端口 + HTTP (关闭 TLS)
+cfrp-detector scan asn 45102 --tls false --port 80,443,8443
+```
+
+#### `scan asns` — 批量 ASN 任务
+
+**任务文件格式** (每行: `ASN:PORT:TLS`，如 `as.txt`)：
+```
+13335:443:true
+45102:"443,8443":true
+16509:80:false
+```
+
+```bash
+cfrp-detector scan asns -f as.txt --concurrency 300 --rate 100000
+```
+
+#### `scan ip` — 扫描单 IP 全端口
+
+```bash
+# 默认: IP=172.67.73.54, ports=1-65535, TLS=true
+cfrp-detector scan ip 1.1.1.1 --rate 200000 --output-dir /tmp/out
+
+# 显式指定端口范围
+cfrp-detector scan ip 104.16.132.229 --port 80,443,8000-9000 --tls false
+```
+
+#### `scan ips` — 批量 IP 列表
+
+**`ips.txt`** 每行一个 IP：
+```
+104.16.132.229
+172.67.73.54
+```
+
+```bash
+cfrp-detector scan ips -f ips.txt --rate 500000 --port 443 --tls true
+```
+
+#### `scan clear-cache` — 清理缓存
+
+```bash
+cfrp-detector scan clear-cache \
+  --asn-cache-dir        ./asn  \
+  --iface-setting-file   ./setting.txt
+```
+
+---
+
+### 🎛️ 选项速查表
+
+#### 全局选项 (全局可用)
+| 选项 (短 / 长) | 默认值 | 说明 |
+|---------------|--------|------|
+| `-C, --config FILE` | — | TOML 配置文件 |
+| `--grace-seconds N` | `30` | Ctrl+C 后最大等待秒数 |
+
+#### `detect` 子命令
 | 分类 | 选项 (短 / 长) | 默认值 | 说明 |
 |------|---------------|--------|------|
-| **配置** | `-C, --config FILE` | — | TOML 配置文件 |
-| **并发** | `-c, --concurrency N` | `10` | 最大并发探测数 (自适应上限) |
-| **自适应** | `--adaptive` | `false` | 启用 AIMD 动态并发调节 |
+| **I/O** | `-i, --input FILE` | — | 批量目标输入 (.json/.csv/.txt) |
+| ↳ | `-o, --output FILE` | stdout | 输出文件 |
+| ↳ | `-f, --format json\|csv\|txt` | auto | 强制输出格式 |
+| ↳ | `TARGET...` | — | 位置参数: `ip[:port]` / `[ipv6]:port` |
+| **并发** | `-c, --concurrency N` | `10` | 最大并发探测数 |
+| **自适应** | `-a, --adaptive` | `false` | 启用 AIMD 动态并发调节 |
 | ↳ | `--a-min / --a-max / --a-initial` | 1 / 128 / 16 | 并发范围 + 初始值 |
-| ↳ | `--a-window N` | 10 | 滑动窗口 (每 N 个样本调一次) |
-| **masscan** | `--interface IFACE` | 自动探测 | 发包网卡 (e.g. eth0, en0) |
-| ↳ | `--rate PPS` | `10000` | masscan 每秒发包数 (0.1M~1M 常用) |
-| ↳ | `--wait-seconds N` | `10` | 发包后等待回包秒数 |
-| ↳ | `--masscan-bin FILE` | PATH 搜索 | 自定义 masscan 二进制 |
+| ↳ | `--a-window N` | 10 | 滑动窗口大小 |
 | **进度** | `-p, --progress` | `false` | 显示 indicatif 进度条 |
-| **测速** | `-s, --speedtest` | `false` | 对节点执行下载测速 |
+| **测速** | `-s, --speed` | `false` | 探测后测速 **(仅 Cloudflare edge 目标)** |
 | ↳ | `--speedtest-threads N` | `3` | 单目标测速连接数 |
 | ↳ | `--speedtest-timeout N` | `5` | 测速超时 (秒) |
 | ↳ | `--speedtest-concurrency N` | `8` | 多个目标并行测速 |
-| ↳ | `--speedtest-url-path PATH` | `/cdn-cgi/trace` | 测速 URL 路径 |
-| ↳ | `--speedtest-0rtt` | `false` | 启用 TLS 0-RTT Early Data |
-| **探测** | `--domain DOMAIN` | `cloudflare.com` | TLS SNI + Host 头域名 |
-| ↳ | `--probe-timeout N` | `3` | 单次探测超时 (秒) |
+| ↳ | `--speedtest-url PATH` | `/cdn-cgi/trace` | 测速 URL 路径 |
+| ↳ | `--enable-0rtt` | `false` | 启用 TLS 0-RTT Early Data |
+| **探测** | `-d, --domain DOMAIN` | `cloudflare.com` | TLS SNI + Host 头域名 |
+| ↳ | `--timeout N` | `3` | 单次探测超时 (秒) |
 | ↳ | `--tls-session-cache N` | `256` | TLS Session 缓存容量 |
 | ↳ | `--no-governor` | `false` | 关闭资源调控器 ❌不推荐 |
-| **缓存** | `--asn-cache-dir DIR` | `asn_cache` | ASN→IP段 下载缓存目录 |
-| ↳ | `--iface-setting-file FILE` | `iface_setting.txt` | 网卡选择记忆文件 |
-| **信号** | `--grace-seconds N` | `30` | Ctrl+C 后最大等待秒数 |
-| **I/O** | `-i, --input FILE` | — | 批量目标输入 (.json/.csv/.txt) |
-| ↳ | `-o, --output FILE` | stdout | 输出文件 (扩展名自动推断) |
-| ↳ | `-f, --format json\|csv\|txt` | auto | 强制输出格式 |
+| ↳ | `--governor-report` | `false` | 探测结束后 stderr 打印资源调控快照 |
 | **调试** | `-v, --verbose`... | 0 | `-v` INFO / `-vv` DEBUG / `-vvv` TRACE |
+| **基准** | `--bench / --bench-quick` | — | 运行进程内 Go 兼容 JSON 基准报告 |
+
+#### `speedtest` 子命令 (独立测速)
+| 分类 | 选项 (短 / 长) | 默认值 | 说明 |
+|------|---------------|--------|------|
+| **I/O** | `-i, --input FILE` / `-o, --output FILE` / `-f, --format` | 同上 | 与 detect 一致 |
+| **测速** | `-d, --domain DOMAIN` | `cloudflare.com` | 连接 SNI/Host |
+| ↳ | `--url PATH` | `/cdn-cgi/trace` | 下载 payload 路径 |
+| ↳ | `-t, --threads N` | `3` | 单目标并发下载线程 |
+| ↳ | `--timeout N` | `5` | 单目标超时 |
+| ↳ | `-C, --concurrency N` | `8` | 并行测速目标数 |
+| ↳ | `--enable-0rtt` | `false` | 启用 0-RTT Early Data |
+| ↳ | `--tls-session-cache N` | `256` | TLS Session 缓存 |
+| ↳ | `-p, --progress` | `false` | 显示进度条 |
+
+#### `scan asn/asns/ip/ips` 通用选项
+由三类参数 flatten 组合：**scan 引擎** + **探测参数** + **测速参数**
+
+| 分类 | 选项 | 默认值 | 说明 |
+|------|------|--------|------|
+| **masscan 引擎** | `--interface IFACE` | 自动探测 | 发包网卡 |
+| ↳ | `--rate PPS` | `10000` | masscan 发包速率 |
+| ↳ | `--masscan-bin FILE` | PATH 搜索 | 自定义 masscan 路径 |
+| ↳ | `--asn-cache-dir DIR` | `asn` | ASN→IP 段缓存目录 |
+| ↳ | `--iface-setting-file FILE` | `setting.txt` | 网卡记忆文件 |
+| ↳ | `--output-dir DIR` | `.` | scan 流水线 CSV 输出目录 |
+| **探测 (同 detect 子集)** | `-d, --domain` / `-c, --concurrency` / `-a, --adaptive` / `--a-*` / `-p, --progress` / `--timeout` / `--tls-session-cache` / `--no-governor` / `--governor-report` | — | 与 detect 语义相同 |
+| **测速** | `-s, --speedtest` | `false` | 对确认的 CF edge 测速 |
+| ↳ | `-t, --threads` | `3` | 单目标测速线程数 |
+| ↳ | `--speedtest-url` | `/cdn-cgi/trace` | 测速 URL 路径 |
+| ↳ | `--speedtest-timeout` | `5` | 测速超时 |
+| ↳ | `--speedtest-concurrency` | `8` | 并行目标数 |
 
 ---
 
@@ -304,7 +358,7 @@ a_window          = 8
 
 # ========== 探测 & 测速 ==========
 progress          = true
-speedtest         = true
+speedtest         = true                  # 与 detect -s / --speed 语义相同
 speedtest_threads = 6
 speedtest_timeout_secs      = 8
 speedtest_concurrency       = 16
@@ -314,10 +368,12 @@ probe_timeout_secs          = 5
 tls_session_cache = 512
 no_governor       = false
 
-# ========== masscan ==========
+# ========== masscan (scan 子命令) ==========
 rate              = 200000
 interface         = "eth0"
-wait_seconds      = 15
+asn_cache_dir     = "asn"
+iface_setting_file = "setting.txt"
+output_dir        = "."
 grace_seconds     = 60
 ```
 
@@ -325,7 +381,7 @@ grace_seconds     = 60
 
 ```bash
 export CFRP_CONCURRENCY=300
-export CFRP_SPEEDTEST=true
+export CFRP_SPEEDTEST=true              # 对应 detect --speed / scan -s
 export CFRP_DOMAIN=my-cf.example.net
 export CFRP_INPUT=/data/targets/ips.csv
 export CFRP_OUTPUT=/data/out.csv
@@ -424,7 +480,7 @@ async fn main() -> anyhow::Result<()> {
 A: masscan 发送原始 SYN 需要 `CAP_NET_RAW`。两种方案：
    ```bash
    # (a) 直接 sudo 运行 (推荐简单场景)
-   sudo -E ./target/release/cfrp-detector --rate 200000 single-asn --asn 13335
+   sudo -E ./target/release/cfrp-detector scan asn 13335 --rate 200000
 
    # (b) 给二进制能力 (免 sudo, 生产部署)
    sudo setcap cap_net_raw,cap_net_admin=ep ./target/release/cfrp-detector
