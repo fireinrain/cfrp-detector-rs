@@ -20,7 +20,7 @@
 | 📈 **质量评估** | TCP/TLS 握手延迟、HTTP 状态码、**多线程下载测速** (可开启 TLS 0-RTT Early Data) |
 | ⚡ **masscan 深度集成** | 单 ASN / 批量 ASN / 单 IP / 批量 IP 四种流水线；ASN → IP 段从 bgp.he 抓取并本地缓存 |
 | 🎚️ **自适应并发** | AIMD 加增乘减算法实时根据错误率 / 超时率调节并发；结合 `ResourceGovernor` 主动防文件描述符耗尽 |
-| 🧩 **三层配置系统** | **CLI 标志 > 环境变量 `CFRP_*` > TOML 配置文件 > 内置默认**， 任意组合正确覆盖 |
+| 🧩 **四层配置系统** | **CLI 标志 > 环境变量 `CFRP_*` > TOML 配置文件 (自动发现) > 内置默认**， 任意组合正确覆盖；`init` 显式生成，`config show/get` 调试溯源 |
 | 📦 **多格式 I/O** | 输入支持 JSON 对象数组 / JSON 字符串数组 / CSV / 带 `#` 注释 TXT；输出支持 JSON / CSV / TXT |
 | 🛟 **优雅关闭** | `SIGINT` / `SIGTERM` 捕获 + 可配置宽限期 (grace seconds)，已完成探测结果全部写盘不丢失 |
 | 🧱 **库 / CLI 双层架构** | `cfrp-detector` 纯库可嵌入任何 Rust 服务，`cfrp-detector-cli` 命令行开箱即用 |
@@ -80,8 +80,14 @@ cargo build --release
 # 4. (可选) 安装到 ~/.cargo/bin
 cargo install --path crates/cfrp-detector-cli
 
-# 5. 验证
+# 5. (推荐) 生成一份带注释的默认配置到当前目录 (可跳过，但新用户强烈建议)
+./target/release/cfrp-detector init
+
+# 6. 验证
 ./target/release/cfrp-detector --help
+
+# 7. (可选) 快速查看生效的配置 + 来源标记
+./target/release/cfrp-detector config show
 ```
 
 ### 运行测试
@@ -107,6 +113,10 @@ cargo bench -p cfrp-detector
 cfrp-detector <全局选项> [子命令]
 
 可用子命令:
+  init         生成带注释的 TOML 配置文件 (默认: ./cfrp.toml)
+  config       查看 / 诊断当前生效的配置 (带来源标记)
+    show       打印全部配置及来源: [CLI]/[FILE path]/[ENV]/[DEF]
+    get        查询单个配置键的有效值与来源
   detect       直接探测目标 IP:Port 是否为 Cloudflare 边缘节点 (无需 masscan)
   speedtest    对给定目标执行独立下载测速 (不做边缘识别)
   scan         masscan 扫描 → 探测 → 可选测速 的一体化流水线 (需 masscan)
@@ -117,6 +127,58 @@ cfrp-detector <全局选项> [子命令]
     clear-cache  清除 ASN 缓存 / 网卡配置 / 临时文件
   help         打印此帮助或子命令帮助
 ```
+
+---
+
+### 0️⃣ `init` — 生成配置文件 (显式优于隐式)
+
+**第一次使用强烈建议先运行一次**，工具会生成一份**带详尽中文注释**的 TOML，比翻手册直观得多：
+
+```bash
+# 🌱 默认: 在当前目录生成 cfrp.toml (已存在则拒绝覆盖，防止丢配置)
+cfrp-detector init
+
+# 📌 生成到指定路径
+cfrp-detector init -o /etc/cfrp/config.toml
+
+# ⚠️ 强制覆盖已有文件 (危险: 会丢弃用户的手动修改)
+cfrp-detector init --force
+
+# 🎯 极简版 (只保留核心字段，适合老手)
+cfrp-detector init --minimal
+```
+
+> 💡 **设计原则**: 只有显式调用 `init` 才会写文件；其他命令**永远不会自动创建**配置文件，但会**自动发现**已存在的配置文件。
+
+---
+
+### 0️⃣½ `config` — 诊断配置来源
+
+排错神器，直接回答「为什么这个参数和我想的不一样？」：
+
+```bash
+# 打印全部生效配置，并标出每一项的来源
+cfrp-detector config show
+# [CLI]  concurrency          = 100
+# [FILE ./cfrp.toml] adaptive = true
+# [ENV]  probe_timeout_secs   = 5
+# [DEF]  a_min                = 2
+
+# 查询单个键 (支持下划线或连字符)
+cfrp-detector config get speedtest_concurrency
+# [FILE ~/.config/cfrp/config.toml] speedtest_concurrency = 16
+
+cfrp-detector config get rate
+# [DEF] rate = 100000
+```
+
+四种来源标记：
+| 标签 | 含义 | 优先级 |
+|------|------|--------|
+| `[CLI]` | 命令行 flag 传入 | 🥇 最高 |
+| `[ENV]` | `CFRP_*` 环境变量 | 🥈 |
+| `[FILE <path>]` | TOML 配置文件 (含路径) | 🥉 |
+| `[DEF]` | 编译期默认值 | 🏠 最低 |
 
 ---
 
@@ -220,7 +282,8 @@ cfrp-detector scan clear-cache \
 #### 全局选项 (全局可用)
 | 选项 (短 / 长) | 默认值 | 说明 |
 |---------------|--------|------|
-| `-C, --config FILE` | — | TOML 配置文件 |
+| `-C, --config FILE` | (自动发现) | **显式指定** TOML 配置文件。不传则按下列路径**自动查找**：<br>① `./cfrp.toml` (项目级)<br>② `$XDG_CONFIG_HOME/cfrp/config.toml` (用户级，通常为 `~/.config/cfrp/config.toml`)<br>③ `/etc/cfrp/config.toml` (系统级) |
+| `--no-config` | `false` | **完全跳过**所有 TOML 配置文件 (即使 -C 指定或自动发现路径存在也不用)；CI / 排错时非常有用 |
 | `--grace-seconds N` | `30` | Ctrl+C 后最大等待秒数 |
 
 #### `detect` 子命令
@@ -268,11 +331,11 @@ cfrp-detector scan clear-cache \
 | 分类 | 选项 | 默认值 | 说明 |
 |------|------|--------|------|
 | **masscan 引擎** | `--interface IFACE` | 自动探测 | 发包网卡 |
-| ↳ | `--rate PPS` | `10000` | masscan 发包速率 |
+| ↳ | `--rate PPS` | `10000` (CLI) / `100000` (配置文件) | masscan 发包速率；**只要加载了 init 生成的默认配置就是 100000** |
 | ↳ | `--masscan-bin FILE` | PATH 搜索 | 自定义 masscan 路径 |
 | ↳ | `--asn-cache-dir DIR` | `asn` | ASN→IP 段缓存目录 |
 | ↳ | `--iface-setting-file FILE` | `setting.txt` | 网卡记忆文件 |
-| ↳ | `--output-dir DIR` | `.` | scan 流水线 CSV 输出目录 |
+| ↳ | `--output-dir DIR` | `.` (CLI) / `./scan_results` (配置文件) | scan 流水线 CSV 输出目录 |
 | **探测 (同 detect 子集)** | `-d, --domain` / `-c, --concurrency` / `-a, --adaptive` / `--a-*` / `-p, --progress` / `--timeout` / `--tls-session-cache` / `--no-governor` / `--governor-report` | — | 与 detect 语义相同 |
 | **测速** | `-s, --speedtest` | `false` | 对确认的 CF edge 测速 |
 | ↳ | `-t, --threads` | `3` | 单目标测速线程数 |
@@ -333,62 +396,96 @@ ip,port
 
 ---
 
-## ⚙️ 三层配置系统
+## ⚙️ 四层配置系统
 
 优先级从高到低：  
-**🥇 CLI 标志  →  🥈 环境变量 `CFRP_*`  →  🥉 TOML 配置文件  →  编译期默认值**
+**🥇 CLI 标志  →  🥈 环境变量 `CFRP_*`  →  🥉 TOML 配置文件 (自动发现)  →  🏠 编译期默认值**
 
-### TOML 示例 (`config.toml`)
+> 💡 配置文件**不会自动创建** — 必须通过 `cfrp-detector init` 显式生成。但只要文件存在于标准路径，工具就会**自动找到并加载**。
+
+### 配置文件查找顺序（无 `-C` 时）
+
+```
+① 项目级:   ./cfrp.toml                         ← 优先使用，每个项目/目录单独配置
+② 用户级:   ~/.config/cfrp/config.toml          ← XDG 兼容，CFRP_CONFIG_HOME 环境变量可覆盖
+③ 系统级:   /etc/cfrp/config.toml               ← 全机器统一默认 (类 Unix)
+```
+
+若需完全跳过配置文件（CI 环境 / 排错），加 `--no-config` 全局标志。
+
+### TOML 示例 (由 `init` 生成的默认版，节选)
+
+**文件名建议**：项目根目录 `cfrp.toml`，或全局放 `~/.config/cfrp/config.toml`
 
 ```toml
+# ============================================================
+# cfrp-detector default configuration file
+# 生成方式: cfrp-detector init
+# 优先级 (高→低): CLI 标志 > CFRP_* env > 本文件 > 编译默认
+# ============================================================
+
 # ========== I/O ==========
-domain            = "cf.bench.example.com"
-input             = "ips.csv"             # .json / .csv / .txt 皆可
-output            = "results/cf.json"
-format            = "json"                # json | csv | txt
-targets           = ["104.16.132.229:443", "172.67.73.54"]
+# domain            = "cloudflare.com"        # TLS SNI + Host 头
+# input             = "ips.txt"               # 批量目标文件
+# output            = "result.json"           # 输出文件
+# format            = "json"                  # json | csv | txt
+# targets           = ["1.1.1.1:443", "104.16.132.229:443"]  # 固定目标列表
 
-# ========== 并发 & 性能 ==========
-concurrency       = 200
-adaptive          = true                  # AIMD 动态并发
+# ========== 并发 & 自适应 (AIMD) ==========
+concurrency       = 50                      # 出厂默认 10 → init 建议值 50
+adaptive          = true                    # 默认开 AIMD (省心)
 a_min             = 2
-a_max             = 512
+a_max             = 256
 a_initial         = 32
-a_window          = 8
+a_window          = 10
 
-# ========== 探测 & 测速 ==========
-progress          = true
-speedtest         = true                  # 与 detect -s / --speed 语义相同
-speedtest_threads = 6
-speedtest_timeout_secs      = 8
+# ========== 探测参数 ==========
+progress          = true                    # 默认显示进度条
+probe_timeout_secs          = 5             # 3s 对跨国链路太紧，放宽到 5s
+tls_session_cache = 512
+# governor_report  = false
+# no_governor      = false                   # 资源调控器不建议关
+
+# ========== 测速参数 ==========
+# speedtest        = false                   # 探测后是否自动测速 (较慢)
+speedtest_threads = 4
+speedtest_timeout_secs      = 10
 speedtest_concurrency       = 16
 speedtest_url_path          = "/cdn-cgi/trace"
-speedtest_0rtt    = true
-probe_timeout_secs          = 5
-tls_session_cache = 512
-no_governor       = false
+# speedtest_0rtt   = false
 
 # ========== masscan (scan 子命令) ==========
-rate              = 200000
-interface         = "eth0"
+rate              = 100000                  # 100k pps (家用/办公网卡安全值)
+# interface        = "eth0"                  # 留空自动探测
 asn_cache_dir     = "asn"
 iface_setting_file = "setting.txt"
-output_dir        = "."
-grace_seconds     = 60
+output_dir        = "./scan_results"        # 统一放到独立子目录，别乱扔到 ./
+
+# ========== 其他 ==========
+grace_seconds     = 30
 ```
 
 ### 环境变量 (前缀自动 `CFRP_`，下划线分隔)
 
 ```bash
 export CFRP_CONCURRENCY=300
-export CFRP_SPEEDTEST=true              # 对应 detect --speed / scan -s
+export CFRP_ADAPTIVE=true
+export CFRP_SPEEDTEST=true                  # 对应 detect -s / scan -s
 export CFRP_DOMAIN=my-cf.example.net
 export CFRP_INPUT=/data/targets/ips.csv
 export CFRP_OUTPUT=/data/out.csv
 export CFRP_ASN_CACHE_DIR=/var/cache/cfrp/asn
+export CFRP_RATE=500000                     # masscan 速率 (scan)
+export CFRP_INTERFACE=eth0
 
-# 提示: CFRP_TARGETS 会被主动忽略 (shell 数组传递不可靠)
-#       多目标请使用 CLI 位置参数 或 --input 文件
+# 可用的完整变量清单 (对应 TOML 字段, 全大写下划线):
+# DOMAIN / INPUT / OUTPUT / FORMAT / TARGETS
+# CONCURRENCY / ADAPTIVE / A_MIN / A_MAX / A_INITIAL / A_WINDOW
+# PROGRESS / PROBE_TIMEOUT_SECS / TLS_SESSION_CACHE / GOVERNOR_REPORT / NO_GOVERNOR
+# SPEEDTEST / SPEEDTEST_URL_PATH / SPEEDTEST_THREADS / SPEEDTEST_TIMEOUT_SECS
+# SPEEDTEST_CONCURRENCY / SPEEDTEST_0RTT
+# INTERFACE / RATE / MASSCAN_BINARY / ASN_CACHE_DIR / IFACE_SETTING_FILE / OUTPUT_DIR
+# BENCH / BENCH_QUICK / GRACE_SECONDS
 ```
 
 ---
@@ -500,6 +597,23 @@ A: 工具内置 `ResourceGovernor` 会在 `ulimit -n` 附近主动限流；仍�
 
 **Q: ASN 缓存多久失效？**  
 A: 从 `https://bgp.he.net/AS{asn}#_prefixes` 拉取，下载的 HTML 永久缓存到 `--asn-cache-dir`，直到 `clear-cache` 或手动删除。适合定期对同一批 ASN 做重复扫描。
+
+**Q: 怎么确认当前到底生效的是哪份配置 / 某个值从哪来的？**  
+A: 用 `config` 子命令，这是最直接的排错方式：
+   ```bash
+   # 打印全部配置及来源标记
+   cfrp-detector config show
+
+   # 只查某一项 (例: 为什么 rate 是 100000 不是 10000？)
+   cfrp-detector config get rate
+   # [FILE ./cfrp.toml] rate = 100000   ← 答案: 因为当前目录有 cfrp.toml
+
+   # 临时忽略所有配置文件，确认"纯 CLI+默认"的行为
+   cfrp-detector --no-config detect ...
+   ```
+
+**Q: 为什么默认 `--concurrency` 文档里写的是 10，但我实际跑看到的是 50？**  
+A: 因为你当前目录 / 用户目录下已经有一份由 `init` 生成的 `cfrp.toml` 把它覆盖成 50 了。用 `cfrp-detector config get concurrency` 立刻就能看到来源。这正是「自动发现 + 配置溯源」设计的目的 — 不再有"幽灵默认值"。
 
 ---
 

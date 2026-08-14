@@ -98,6 +98,35 @@ pub struct ConfigFile {
 
     #[serde(default = "cf_grace_seconds")]
     pub grace_seconds: u64,
+
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default = "cf_rate")]
+    pub rate: u64,
+    #[serde(default = "cf_masscan_binary")]
+    pub masscan_binary: Option<PathBuf>,
+    #[serde(default = "cf_asn_cache_dir")]
+    pub asn_cache_dir: PathBuf,
+    #[serde(default = "cf_iface_setting_file")]
+    pub iface_setting_file: PathBuf,
+    #[serde(default = "cf_output_dir")]
+    pub output_dir: PathBuf,
+}
+
+fn cf_rate() -> u64 {
+    100000
+}
+fn cf_masscan_binary() -> Option<PathBuf> {
+    None
+}
+fn cf_asn_cache_dir() -> PathBuf {
+    PathBuf::from("asn")
+}
+fn cf_iface_setting_file() -> PathBuf {
+    PathBuf::from("setting.txt")
+}
+fn cf_output_dir() -> PathBuf {
+    PathBuf::from("./scan_results")
 }
 
 fn cf_concurrency() -> usize {
@@ -167,6 +196,12 @@ impl Default for ConfigFile {
             bench: false,
             bench_quick: false,
             grace_seconds: cf_grace_seconds(),
+            interface: None,
+            rate: cf_rate(),
+            masscan_binary: cf_masscan_binary(),
+            asn_cache_dir: cf_asn_cache_dir(),
+            iface_setting_file: cf_iface_setting_file(),
+            output_dir: cf_output_dir(),
         }
     }
 }
@@ -181,6 +216,13 @@ struct GlobalArgs {
         help = "TOML configuration file. Env vars override config file values, CLI flags override env vars"
     )]
     config: Option<PathBuf>,
+
+    #[arg(
+        long = "no-config",
+        global = true,
+        help = "Skip loading config files from auto-discovery paths (./cfrp.toml, ~/.config/cfrp/config.toml, /etc/cfrp/config.toml)"
+    )]
+    no_config: bool,
 
     #[arg(
         long = "grace-seconds",
@@ -761,8 +803,68 @@ enum ScanCmd {
     },
 }
 
+#[derive(Debug, Clone, Parser)]
+struct InitArgs {
+    #[arg(
+        short = 'o',
+        long = "output",
+        value_name = "FILE",
+        help = "Output path for the generated config file (default: ./cfrp.toml)"
+    )]
+    output: Option<PathBuf>,
+
+    #[arg(
+        long = "force",
+        help = "Overwrite the config file if it already exists (DANGEROUS: will discard user edits)"
+    )]
+    force: bool,
+
+    #[arg(
+        long = "minimal",
+        help = "Generate a minimal config with only core fields (for advanced users)"
+    )]
+    minimal: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCmd {
+    #[command(
+        about = "Show the effective merged configuration with source annotations",
+        long_about = "Prints every config field along with its source: [CLI] command line flag, \
+                     [FILE] loaded from a TOML config (shown with path), [ENV] from CFRP_* \
+                     environment variable, or [DEF] compiled-in default. Useful for debugging \
+                     \"why is this parameter different from what I expected?\""
+    )]
+    Show,
+
+    #[command(
+        about = "Get the effective value and source of a single config key",
+        long_about = "Example: cfrp-detector config get concurrency"
+    )]
+    Get {
+        #[arg(help = "Config key name, e.g. concurrency, adaptive, speedtest_threads, rate")]
+        key: String,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(
+        about = "Generate a default TOML configuration file with detailed comments",
+        long_about = "Creates a commented TOML config file at the target path (default ./cfrp.toml). \
+                     Use --minimal for a short version with only the core fields. This command \
+                     never auto-runs; you must invoke it explicitly to create a config."
+    )]
+    Init(InitArgs),
+
+    #[command(
+        about = "Inspect effective configuration and diagnose config sources",
+        long_about = "Subcommands for debugging the merged configuration: show all values with \
+                     source annotations, or query a single key to see where it came from."
+    )]
+    #[command(subcommand)]
+    Config(ConfigCmd),
+
     #[command(
         about = "Detect Cloudflare edge nodes on the given targets",
         long_about = "Probes one or more `ip:port` targets to determine whether they are Cloudflare \
@@ -798,6 +900,12 @@ enum Command {
     about = "Cloudflare edge detector and network quality probe",
     after_help = concat!(
         "EXAMPLES:\n",
+        "  # Generate a commented default config in the current directory\n",
+        "  cfrp-detector init\n",
+        "\n",
+        "  # Show the effective merged configuration with source annotations\n",
+        "  cfrp-detector config show\n",
+        "\n",
         "  # Detect if an IP:port is a Cloudflare edge\n",
         "  cfrp-detector detect 104.16.132.229:443\n",
         "\n",
@@ -1233,10 +1341,828 @@ fn run_in_process_bench(quick: bool) -> InProcessBaselineSuite {
     }
 }
 
+fn find_config_file() -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = vec![
+        PathBuf::from("./cfrp.toml"),
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .map(|p| p.join("cfrp/config.toml"))
+            .unwrap_or_else(|| {
+                dirs_home()
+                    .map(|h| h.join(".config/cfrp/config.toml"))
+                    .unwrap_or_else(|| PathBuf::new())
+            }),
+        PathBuf::from("/etc/cfrp/config.toml"),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).or_else(|| {
+        #[cfg(windows)]
+        {
+            std::env::var_os("USERPROFILE").map(PathBuf::from)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    })
+}
+
+fn resolve_config_path(cli: &Cli) -> Option<(PathBuf, PathBuf)> {
+    if cli.global.no_config {
+        return None;
+    }
+    if let Some(explicit) = cli.global.config.clone() {
+        let canonical = explicit.clone();
+        return Some((explicit, canonical));
+    }
+    find_config_file().map(|p| (p.clone(), p))
+}
+
+fn generate_default_config_toml() -> String {
+    String::from(
+        r#"# ============================================================
+# cfrp-detector default configuration file
+# Generated by `cfrp-detector init` — edit freely, then re-run init --force only to regenerate
+# Lines starting with `#` are optional examples; uncomment to override.
+# Priority (highest to lowest): CLI flags > CFRP_* env > this file > compiled defaults
+# ============================================================
+
+# ============== 基本 I/O ==============
+# TLS SNI + Host header used when probing
+# domain = "cloudflare.com"
+
+# Batch input file (one target per line, or JSON array, or CSV)
+# input  = "ips.txt"
+
+# Write results to file instead of stdout
+# output = "result.json"
+
+# Output format override: txt | csv | json  (default: infer from output extension, else json)
+# format = "json"
+
+# Fixed target list (appended with CLI positional targets)
+# targets = ["1.1.1.1:443", "104.16.132.229:443"]
+
+# ============== 并发 & 自适应 (AIMD) ==============
+# Initial worker concurrency (default 10; raised here to 50 as a practical sweet-spot)
+concurrency      = 50
+
+# Enable the adaptive AIMD concurrency governor (recommended for large batches)
+adaptive         = true
+a_min            = 2
+a_max            = 256
+a_initial        = 32
+a_window         = 10
+
+# ============== 探测参数 ==============
+# Show an interactive progress bar on stderr
+progress         = true
+
+# Per-target HTTPS+HTTP timeout in seconds (3s is too aggressive for cross-border links)
+probe_timeout_secs = 5
+
+# TLS session cache size (bumped up for large batch workloads)
+tls_session_cache = 512
+
+# Print FD/governor snapshot on stderr after batch detection
+# governor_report = false
+
+# Disable the resource-aware concurrency governor entirely (discouraged)
+# no_governor     = false
+
+# ============== 测速参数 ==============
+# After detection, auto-run download speed-tests on confirmed edge targets
+# speedtest       = false
+
+speedtest_threads        = 4
+speedtest_timeout_secs   = 10
+speedtest_concurrency    = 16
+speedtest_url_path       = "/cdn-cgi/trace"
+
+# Enable TLS 0-RTT early data for speedtest (requires warm cache on same endpoint)
+# speedtest_0rtt  = false
+
+# ============== masscan (scan 子命令) ==============
+# masscan SYN-scan packet rate (pps). 100k is safe for home / office NICs; raise to 1-10M on servers.
+rate             = 100000
+
+# Network interface for masscan (omitted = auto-detect or loaded from setting.txt)
+# interface      = "eth0"
+
+# Path to masscan binary (default: ./masscan if present, otherwise 'masscan' on PATH)
+# masscan_binary = "/usr/local/bin/masscan"
+
+asn_cache_dir    = "asn"
+iface_setting_file = "setting.txt"
+output_dir       = "./scan_results"
+
+# ============== 其他 ==============
+grace_seconds    = 30
+"#,
+    )
+}
+
+fn generate_minimal_config_toml() -> String {
+    String::from(
+        r#"# cfrp-detector minimal config
+# Only the knobs you'll typically tweak for everyday use.
+
+domain           = "cloudflare.com"
+concurrency      = 50
+adaptive         = true
+a_initial        = 32
+progress         = true
+probe_timeout_secs = 5
+tls_session_cache = 512
+
+# speedtest auto-run after detect
+# speedtest      = true
+speedtest_threads = 4
+
+# masscan scan pipeline
+rate             = 100000
+output_dir       = "./scan_results"
+grace_seconds    = 30
+"#,
+    )
+}
+
+fn run_init_command(args: &InitArgs) -> Result<()> {
+    let target = args
+        .output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("./cfrp.toml"));
+
+    if target.exists() && !args.force {
+        anyhow::bail!(
+            "config file already exists: {}. Refusing to overwrite (user edits would be lost).\n\
+             Use --force if you really want to discard your edits and regenerate from scratch.",
+            target.display()
+        );
+    }
+
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("create parent directory for {}", target.display()))?;
+        }
+    }
+
+    let contents = if args.minimal {
+        generate_minimal_config_toml()
+    } else {
+        generate_default_config_toml()
+    };
+
+    let mut f = fs::File::create(&target)
+        .with_context(|| format!("create config file {}", target.display()))?;
+    f.write_all(contents.as_bytes())
+        .with_context(|| format!("write config file {}", target.display()))?;
+    drop(f);
+
+    eprintln!(
+        "{} wrote config with {} bytes to {}",
+        if args.minimal {
+            "[minimal]"
+        } else {
+            "[default]"
+        },
+        contents.len(),
+        target.display()
+    );
+    eprintln!("  next steps: edit the file, then run e.g.  cfrp-detector detect -p 1.1.1.1:443");
+    Ok(())
+}
+
+#[derive(Clone)]
+enum ConfigSource {
+    Cli,
+    File(PathBuf),
+    Env,
+    Def,
+}
+
+impl ConfigSource {
+    fn tag(&self) -> String {
+        match self {
+            ConfigSource::Cli => "[CLI] ".into(),
+            ConfigSource::File(p) => format!("[FILE {}] ", p.display()),
+            ConfigSource::Env => "[ENV] ".into(),
+            ConfigSource::Def => "[DEF] ".into(),
+        }
+    }
+}
+
+fn fmt_opt_path(p: &Option<PathBuf>) -> String {
+    match p {
+        Some(v) => format!("{}", v.display()),
+        None => "<none>".into(),
+    }
+}
+fn fmt_opt_str(s: &Option<String>) -> String {
+    match s {
+        Some(v) => format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")),
+        None => "<none>".into(),
+    }
+}
+fn fmt_vec_str(v: &[String]) -> String {
+    if v.is_empty() {
+        "[]".into()
+    } else {
+        format!(
+            "[{}]",
+            v.iter()
+                .map(|s| format!("\"{s}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+fn fmt_path(p: &PathBuf) -> String {
+    format!("{}", p.display())
+}
+
+fn run_config_show(cli: &Cli) -> Result<()> {
+    let detect_defaults = DetectArgs::default();
+    let cfg = merge_config(cli, &detect_defaults)?;
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut rows: Vec<(&str, String, ConfigSource)> = Vec::new();
+
+    let cli_explicit = cli.global.config.is_some()
+        || args.iter().any(|a| {
+            a == "-C" || a.starts_with("-C=") || a == "--config" || a.starts_with("--config=")
+        });
+    let src_file = if cli_explicit {
+        ConfigSource::File(
+            cli.global
+                .config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("<explicit>")),
+        )
+    } else if let Some((p, _)) = resolve_config_path(cli) {
+        ConfigSource::File(p)
+    } else {
+        ConfigSource::Def
+    };
+
+    let env_flag = |name: &str| -> ConfigSource {
+        if std::env::var(format!("CFRP_{}", name.to_uppercase())).is_ok() {
+            ConfigSource::Env
+        } else {
+            match &src_file {
+                ConfigSource::Def => ConfigSource::Def,
+                other => other.clone(),
+            }
+        }
+    };
+    let bool_flag =
+        |cli_flag: bool, env_name: &str, compiled: bool, merged: bool| -> ConfigSource {
+            if cli_flag && merged {
+                ConfigSource::Cli
+            } else if std::env::var(format!("CFRP_{}", env_name.to_uppercase())).is_ok() {
+                ConfigSource::Env
+            } else if matches!(&src_file, ConfigSource::File(_)) {
+                src_file.clone()
+            } else if merged == compiled {
+                ConfigSource::Def
+            } else {
+                src_file.clone()
+            }
+        };
+
+    rows.push(("domain", fmt_opt_str(&cfg.domain), env_flag("DOMAIN")));
+    rows.push(("input", fmt_opt_path(&cfg.input), env_flag("INPUT")));
+    rows.push(("output", fmt_opt_path(&cfg.output), env_flag("OUTPUT")));
+    rows.push((
+        "format",
+        match cfg.format {
+            Some(OutputFormat::Txt) => "txt".into(),
+            Some(OutputFormat::Csv) => "csv".into(),
+            Some(OutputFormat::Json) => "json".into(),
+            None => "<none>".into(),
+        },
+        env_flag("FORMAT"),
+    ));
+    rows.push((
+        "targets",
+        fmt_vec_str(&cfg.targets),
+        if args.iter().any(|a| !a.starts_with('-') && a.contains(':')) {
+            ConfigSource::Cli
+        } else {
+            env_flag("TARGETS")
+        },
+    ));
+
+    rows.push((
+        "concurrency",
+        format!("{}", cfg.concurrency),
+        if args.iter().any(|a| {
+            a == "-c"
+                || a.starts_with("-c=")
+                || a == "--concurrency"
+                || a.starts_with("--concurrency=")
+        }) {
+            ConfigSource::Cli
+        } else {
+            env_flag("CONCURRENCY")
+        },
+    ));
+    rows.push((
+        "adaptive",
+        format!("{}", cfg.adaptive),
+        bool_flag(
+            detect_defaults.adaptive || args.iter().any(|a| a == "-a" || a == "--adaptive"),
+            "ADAPTIVE",
+            false,
+            cfg.adaptive,
+        ),
+    ));
+    rows.push((
+        "a_min",
+        format!("{}", cfg.a_min),
+        if args
+            .iter()
+            .any(|a| a == "--a-min" || a.starts_with("--a-min="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("A_MIN")
+        },
+    ));
+    rows.push((
+        "a_max",
+        format!("{}", cfg.a_max),
+        if args
+            .iter()
+            .any(|a| a == "--a-max" || a.starts_with("--a-max="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("A_MAX")
+        },
+    ));
+    rows.push((
+        "a_initial",
+        format!("{}", cfg.a_initial),
+        if args
+            .iter()
+            .any(|a| a == "--a-initial" || a.starts_with("--a-initial="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("A_INITIAL")
+        },
+    ));
+    rows.push((
+        "a_window",
+        format!("{}", cfg.a_window),
+        if args
+            .iter()
+            .any(|a| a == "--a-window" || a.starts_with("--a-window="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("A_WINDOW")
+        },
+    ));
+
+    rows.push((
+        "progress",
+        format!("{}", cfg.progress),
+        bool_flag(
+            args.iter().any(|a| a == "-p" || a == "--progress"),
+            "PROGRESS",
+            false,
+            cfg.progress,
+        ),
+    ));
+    rows.push((
+        "probe_timeout_secs",
+        format!("{}", cfg.probe_timeout_secs),
+        if args
+            .iter()
+            .any(|a| a == "--timeout" || a.starts_with("--timeout="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("PROBE_TIMEOUT_SECS")
+        },
+    ));
+    rows.push((
+        "tls_session_cache",
+        format!("{}", cfg.tls_session_cache),
+        if args
+            .iter()
+            .any(|a| a == "--tls-session-cache" || a.starts_with("--tls-session-cache="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("TLS_SESSION_CACHE")
+        },
+    ));
+    rows.push((
+        "governor_report",
+        format!("{}", cfg.governor_report),
+        bool_flag(
+            args.iter().any(|a| a == "--governor-report"),
+            "GOVERNOR_REPORT",
+            false,
+            cfg.governor_report,
+        ),
+    ));
+    rows.push((
+        "no_governor",
+        format!("{}", cfg.no_governor),
+        bool_flag(
+            args.iter().any(|a| a == "--no-governor"),
+            "NO_GOVERNOR",
+            false,
+            cfg.no_governor,
+        ),
+    ));
+
+    rows.push((
+        "speedtest",
+        format!("{}", cfg.speedtest),
+        bool_flag(
+            args.iter().any(|a| a == "-s" || a == "--speed"),
+            "SPEEDTEST",
+            false,
+            cfg.speedtest,
+        ),
+    ));
+    rows.push((
+        "speedtest_url_path",
+        format!("\"{}\"", cfg.speedtest_url_path),
+        if args
+            .iter()
+            .any(|a| a == "--speedtest-url" || a.starts_with("--speedtest-url="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("SPEEDTEST_URL_PATH")
+        },
+    ));
+    rows.push((
+        "speedtest_threads",
+        format!("{}", cfg.speedtest_threads),
+        if args
+            .iter()
+            .any(|a| a == "--speedtest-threads" || a.starts_with("--speedtest-threads="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("SPEEDTEST_THREADS")
+        },
+    ));
+    rows.push((
+        "speedtest_timeout_secs",
+        format!("{}", cfg.speedtest_timeout_secs),
+        if args
+            .iter()
+            .any(|a| a == "--speedtest-timeout" || a.starts_with("--speedtest-timeout="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("SPEEDTEST_TIMEOUT_SECS")
+        },
+    ));
+    rows.push((
+        "speedtest_concurrency",
+        format!("{}", cfg.speedtest_concurrency),
+        if args
+            .iter()
+            .any(|a| a == "--speedtest-concurrency" || a.starts_with("--speedtest-concurrency="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("SPEEDTEST_CONCURRENCY")
+        },
+    ));
+    rows.push((
+        "speedtest_0rtt",
+        format!("{}", cfg.speedtest_0rtt),
+        bool_flag(
+            args.iter().any(|a| a == "--enable-0rtt"),
+            "SPEEDTEST_0RTT",
+            false,
+            cfg.speedtest_0rtt,
+        ),
+    ));
+
+    rows.push((
+        "bench",
+        format!("{}", cfg.bench),
+        bool_flag(
+            args.iter().any(|a| a == "--bench"),
+            "BENCH",
+            false,
+            cfg.bench,
+        ),
+    ));
+    rows.push((
+        "bench_quick",
+        format!("{}", cfg.bench_quick),
+        bool_flag(
+            args.iter().any(|a| a == "--bench-quick"),
+            "BENCH_QUICK",
+            false,
+            cfg.bench_quick,
+        ),
+    ));
+    rows.push((
+        "grace_seconds",
+        format!("{}", cfg.grace_seconds),
+        if args
+            .iter()
+            .any(|a| a == "--grace-seconds" || a.starts_with("--grace-seconds="))
+        {
+            ConfigSource::Cli
+        } else {
+            env_flag("GRACE_SECONDS")
+        },
+    ));
+
+    rows.push((
+        "interface",
+        fmt_opt_str(&cfg.interface),
+        env_flag("INTERFACE"),
+    ));
+    rows.push(("rate", format!("{}", cfg.rate), env_flag("RATE")));
+    rows.push((
+        "masscan_binary",
+        fmt_opt_path(&cfg.masscan_binary),
+        env_flag("MASSCAN_BINARY"),
+    ));
+    rows.push((
+        "asn_cache_dir",
+        fmt_path(&cfg.asn_cache_dir),
+        env_flag("ASN_CACHE_DIR"),
+    ));
+    rows.push((
+        "iface_setting_file",
+        fmt_path(&cfg.iface_setting_file),
+        env_flag("IFACE_SETTING_FILE"),
+    ));
+    rows.push((
+        "output_dir",
+        fmt_path(&cfg.output_dir),
+        env_flag("OUTPUT_DIR"),
+    ));
+
+    let max_key = rows.iter().map(|(k, _, _)| k.len()).max().unwrap_or(0);
+    for (k, v, src) in &rows {
+        println!("{}{:<width$} = {}", src.tag(), k, v, width = max_key);
+    }
+    Ok(())
+}
+
+fn run_config_get(cli: &Cli, key: &str) -> Result<()> {
+    let detect_defaults = DetectArgs::default();
+    let cfg = merge_config(cli, &detect_defaults)?;
+    let k = key.trim().to_ascii_lowercase().replace('-', "_");
+    let args: Vec<String> = std::env::args().collect();
+
+    let cli_explicit = cli.global.config.is_some()
+        || args.iter().any(|a| {
+            a == "-C" || a.starts_with("-C=") || a == "--config" || a.starts_with("--config=")
+        });
+    let src_file = if cli_explicit {
+        ConfigSource::File(
+            cli.global
+                .config
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("<explicit>")),
+        )
+    } else if let Some((p, _)) = resolve_config_path(cli) {
+        ConfigSource::File(p)
+    } else {
+        ConfigSource::Def
+    };
+
+    let env_flag = |name: &str| -> ConfigSource {
+        if std::env::var(format!("CFRP_{}", name.to_uppercase())).is_ok() {
+            ConfigSource::Env
+        } else {
+            match &src_file {
+                ConfigSource::Def => ConfigSource::Def,
+                other => other.clone(),
+            }
+        }
+    };
+    let cli_contains_any = |flags: &[&str]| -> bool {
+        args.iter().any(|a| {
+            flags
+                .iter()
+                .any(|f| a == f || a.starts_with(&format!("{f}=")))
+        })
+    };
+
+    let (val, src): (String, ConfigSource) = match k.as_str() {
+        "domain" => (fmt_opt_str(&cfg.domain), env_flag("DOMAIN")),
+        "input" => (fmt_opt_path(&cfg.input), env_flag("INPUT")),
+        "output" => (fmt_opt_path(&cfg.output), env_flag("OUTPUT")),
+        "format" => (
+            match cfg.format {
+                Some(OutputFormat::Txt) => "txt".into(),
+                Some(OutputFormat::Csv) => "csv".into(),
+                Some(OutputFormat::Json) => "json".into(),
+                None => "<none>".into(),
+            },
+            env_flag("FORMAT"),
+        ),
+        "targets" => (fmt_vec_str(&cfg.targets), env_flag("TARGETS")),
+        "concurrency" => (
+            format!("{}", cfg.concurrency),
+            if cli_contains_any(&["-c", "--concurrency"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("CONCURRENCY")
+            },
+        ),
+        "adaptive" => (
+            format!("{}", cfg.adaptive),
+            if cli_contains_any(&["-a", "--adaptive"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("ADAPTIVE")
+            },
+        ),
+        "a_min" | "a-min" => (
+            format!("{}", cfg.a_min),
+            if cli_contains_any(&["--a-min"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("A_MIN")
+            },
+        ),
+        "a_max" | "a-max" => (
+            format!("{}", cfg.a_max),
+            if cli_contains_any(&["--a-max"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("A_MAX")
+            },
+        ),
+        "a_initial" | "a-initial" => (
+            format!("{}", cfg.a_initial),
+            if cli_contains_any(&["--a-initial"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("A_INITIAL")
+            },
+        ),
+        "a_window" | "a-window" => (
+            format!("{}", cfg.a_window),
+            if cli_contains_any(&["--a-window"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("A_WINDOW")
+            },
+        ),
+        "progress" => (
+            format!("{}", cfg.progress),
+            if cli_contains_any(&["-p", "--progress"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("PROGRESS")
+            },
+        ),
+        "probe_timeout_secs" | "probe-timeout-secs" | "timeout" => (
+            format!("{}", cfg.probe_timeout_secs),
+            if cli_contains_any(&["--timeout"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("PROBE_TIMEOUT_SECS")
+            },
+        ),
+        "tls_session_cache" | "tls-session-cache" => (
+            format!("{}", cfg.tls_session_cache),
+            if cli_contains_any(&["--tls-session-cache"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("TLS_SESSION_CACHE")
+            },
+        ),
+        "governor_report" | "governor-report" => (
+            format!("{}", cfg.governor_report),
+            if cli_contains_any(&["--governor-report"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("GOVERNOR_REPORT")
+            },
+        ),
+        "no_governor" | "no-governor" => (
+            format!("{}", cfg.no_governor),
+            if cli_contains_any(&["--no-governor"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("NO_GOVERNOR")
+            },
+        ),
+        "speedtest" | "speed" => (
+            format!("{}", cfg.speedtest),
+            if cli_contains_any(&["-s", "--speed"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("SPEEDTEST")
+            },
+        ),
+        "speedtest_url_path" | "speedtest-url-path" | "speedtest-url" => (
+            format!("\"{}\"", cfg.speedtest_url_path),
+            if cli_contains_any(&["--speedtest-url"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("SPEEDTEST_URL_PATH")
+            },
+        ),
+        "speedtest_threads" | "speedtest-threads" | "threads" => (
+            format!("{}", cfg.speedtest_threads),
+            if cli_contains_any(&["--speedtest-threads"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("SPEEDTEST_THREADS")
+            },
+        ),
+        "speedtest_timeout_secs" | "speedtest-timeout-secs" | "speedtest-timeout" => (
+            format!("{}", cfg.speedtest_timeout_secs),
+            if cli_contains_any(&["--speedtest-timeout"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("SPEEDTEST_TIMEOUT_SECS")
+            },
+        ),
+        "speedtest_concurrency" | "speedtest-concurrency" => (
+            format!("{}", cfg.speedtest_concurrency),
+            if cli_contains_any(&["--speedtest-concurrency"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("SPEEDTEST_CONCURRENCY")
+            },
+        ),
+        "speedtest_0rtt" | "speedtest-0rtt" | "enable-0rtt" => (
+            format!("{}", cfg.speedtest_0rtt),
+            if cli_contains_any(&["--enable-0rtt"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("SPEEDTEST_0RTT")
+            },
+        ),
+        "bench" => (
+            format!("{}", cfg.bench),
+            if cli_contains_any(&["--bench"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("BENCH")
+            },
+        ),
+        "bench_quick" | "bench-quick" => (
+            format!("{}", cfg.bench_quick),
+            if cli_contains_any(&["--bench-quick"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("BENCH_QUICK")
+            },
+        ),
+        "grace_seconds" | "grace-seconds" => (
+            format!("{}", cfg.grace_seconds),
+            if cli_contains_any(&["--grace-seconds"]) {
+                ConfigSource::Cli
+            } else {
+                env_flag("GRACE_SECONDS")
+            },
+        ),
+        "interface" => (fmt_opt_str(&cfg.interface), env_flag("INTERFACE")),
+        "rate" => (format!("{}", cfg.rate), env_flag("RATE")),
+        "masscan_binary" | "masscan-binary" => (
+            fmt_opt_path(&cfg.masscan_binary),
+            env_flag("MASSCAN_BINARY"),
+        ),
+        "asn_cache_dir" | "asn-cache-dir" => {
+            (fmt_path(&cfg.asn_cache_dir), env_flag("ASN_CACHE_DIR"))
+        }
+        "iface_setting_file" | "iface-setting-file" => (
+            fmt_path(&cfg.iface_setting_file),
+            env_flag("IFACE_SETTING_FILE"),
+        ),
+        "output_dir" | "output-dir" => (fmt_path(&cfg.output_dir), env_flag("OUTPUT_DIR")),
+        other => anyhow::bail!(
+            "unknown config key: '{}'. Hint: try keys like concurrency, adaptive, speedtest_threads, rate, a_initial",
+            other
+        ),
+    };
+    println!("{}{} = {}", src.tag(), k, val);
+    Ok(())
+}
+
 fn merge_config(cli: &Cli, detect: &DetectArgs) -> Result<ConfigFile> {
     let defaults = ConfigFile::default();
     let mut fig = Figment::from(Serialized::defaults(&defaults));
-    if let Some(path) = cli.global.config.as_ref() {
+    if let Some((path, _canonical)) = resolve_config_path(cli) {
         if !path.exists() {
             anyhow::bail!("config file not found: {}", path.display());
         }
@@ -1271,14 +2197,22 @@ fn merge_config(cli: &Cli, detect: &DetectArgs) -> Result<ConfigFile> {
                 | "BENCH"
                 | "BENCH_QUICK"
                 | "GRACE_SECONDS"
+                | "INTERFACE"
+                | "RATE"
+                | "MASSCAN_BINARY"
+                | "ASN_CACHE_DIR"
+                | "IFACE_SETTING_FILE"
+                | "OUTPUT_DIR"
+                | "TARGETS"
         )
     }));
     let cfg: ConfigFile = fig
         .extract()
         .context("merge env + config file into ConfigFile")?;
 
+    let has_any_config_file = resolve_config_path(cli).is_some();
     let mut cli_targets: Vec<String> = detect.targets.clone();
-    let mut merged = if cli.global.config.is_some() {
+    let mut merged = if has_any_config_file {
         let mut t = cfg.targets.clone();
         t.append(&mut cli_targets);
         ConfigFile { targets: t, ..cfg }
@@ -1354,7 +2288,7 @@ fn merge_config(cli: &Cli, detect: &DetectArgs) -> Result<ConfigFile> {
 fn merge_speedtest_config(cli: &Cli, st: &SpeedTestArgs) -> Result<ConfigFile> {
     let defaults = ConfigFile::default();
     let mut fig = Figment::from(Serialized::defaults(&defaults));
-    if let Some(path) = cli.global.config.as_ref() {
+    if let Some((path, _canonical)) = resolve_config_path(cli) {
         if !path.exists() {
             anyhow::bail!("config file not found: {}", path.display());
         }
@@ -1381,8 +2315,9 @@ fn merge_speedtest_config(cli: &Cli, st: &SpeedTestArgs) -> Result<ConfigFile> {
         .extract()
         .context("merge env + config file into speedtest ConfigFile")?;
 
+    let has_any_config_file = resolve_config_path(cli).is_some();
     let mut cli_targets: Vec<String> = st.targets.clone();
-    cfg = if cli.global.config.is_some() {
+    cfg = if has_any_config_file {
         let mut t = cfg.targets.clone();
         t.append(&mut cli_targets);
         ConfigFile { targets: t, ..cfg }
@@ -1466,6 +2401,57 @@ fn build_signals_token(
     (cancel, Box::pin(fut))
 }
 
+fn merge_engine_args(engine: &ScanEngineArgs, cfg: &ConfigFile) -> ScanEngineArgs {
+    let args: Vec<String> = std::env::args().collect();
+    let cli_has = |flags: &[&str]| -> bool {
+        args.iter().any(|a| {
+            flags
+                .iter()
+                .any(|f| a == f || a.starts_with(&format!("{f}=")))
+        })
+    };
+
+    let interface = if cli_has(&["--interface"]) {
+        engine.interface.clone()
+    } else {
+        cfg.interface.clone()
+    };
+    let rate = if cli_has(&["--rate"]) {
+        engine.rate
+    } else {
+        cfg.rate
+    };
+    let masscan_binary = if cli_has(&["--masscan-bin"]) {
+        engine.masscan_binary.clone()
+    } else {
+        cfg.masscan_binary.clone()
+    };
+    let asn_cache_dir = if cli_has(&["--asn-cache-dir"]) {
+        engine.asn_cache_dir.clone()
+    } else {
+        cfg.asn_cache_dir.clone()
+    };
+    let iface_setting_file = if cli_has(&["--iface-setting-file"]) {
+        engine.iface_setting_file.clone()
+    } else {
+        cfg.iface_setting_file.clone()
+    };
+    let output_dir = if cli_has(&["--output-dir"]) {
+        engine.output_dir.clone()
+    } else {
+        cfg.output_dir.clone()
+    };
+
+    ScanEngineArgs {
+        interface,
+        rate,
+        masscan_binary,
+        asn_cache_dir,
+        iface_setting_file,
+        output_dir,
+    }
+}
+
 fn build_masscan_scanner(engine: &ScanEngineArgs) -> MasscanScanner {
     let mut mcfg = MasscanConfig::new();
     mcfg.interface = engine.interface.clone();
@@ -1483,7 +2469,7 @@ fn merge_scan_config(
 ) -> Result<ConfigFile> {
     let defaults = ConfigFile::default();
     let mut fig = Figment::from(Serialized::defaults(&defaults));
-    if let Some(path) = cli.global.config.as_ref() {
+    if let Some((path, _canonical)) = resolve_config_path(cli) {
         if !path.exists() {
             anyhow::bail!("config file not found: {}", path.display());
         }
@@ -1510,6 +2496,12 @@ fn merge_scan_config(
                 | "NO_GOVERNOR"
                 | "TLS_SESSION_CACHE"
                 | "GRACE_SECONDS"
+                | "INTERFACE"
+                | "RATE"
+                | "MASSCAN_BINARY"
+                | "ASN_CACHE_DIR"
+                | "IFACE_SETTING_FILE"
+                | "OUTPUT_DIR"
         )
     }));
     let mut cfg: ConfigFile = fig
@@ -1579,8 +2571,11 @@ fn build_pipeline_options(
 async fn run_scan_command(cli: &Cli, cmd: ScanCmd) -> Result<()> {
     match cmd {
         ScanCmd::ClearCache { engine } => {
-            let asn_dir = engine.asn_cache_dir.clone();
-            let setting = engine.iface_setting_file.clone();
+            let detect_defaults = ScanDetectArgs::default();
+            let cfg_merged = merge_scan_config(cli, &detect_defaults, None)?;
+            let merged_engine = merge_engine_args(&engine, &cfg_merged);
+            let asn_dir = merged_engine.asn_cache_dir.clone();
+            let setting = merged_engine.iface_setting_file.clone();
             cfrp_detector::clear_cache(&asn_dir, &setting)?;
             println!(
                 "scan cache cleared: asn_dir={}, setting={}",
@@ -1598,12 +2593,13 @@ async fn run_scan_command(cli: &Cli, cmd: ScanCmd) -> Result<()> {
             engine,
         } => {
             let cfg_merged = merge_scan_config(cli, &detect, Some(&speedtest))?;
+            let merged_engine = merge_engine_args(&engine, &cfg_merged);
             let tls = tls.unwrap_or(true);
             let port_str = port;
-            let scanner = build_masscan_scanner(&engine);
+            let scanner = build_masscan_scanner(&merged_engine);
             scanner.check_masscan_available()?;
             let pipeline = MasscanPipeline::new(build_pipeline_options(
-                &engine,
+                &merged_engine,
                 &detect,
                 &cfg_merged,
                 speedtest.enabled,
@@ -1631,16 +2627,17 @@ async fn run_scan_command(cli: &Cli, cmd: ScanCmd) -> Result<()> {
             engine,
         } => {
             let cfg_merged = merge_scan_config(cli, &detect, Some(&speedtest))?;
+            let merged_engine = merge_engine_args(&engine, &cfg_merged);
             let tasks_raw = MasscanScanner::read_asn_task_file(&filename)?;
             if tasks_raw.is_empty() {
                 anyhow::bail!("no ASN tasks found in {}", filename.display());
             }
             let tasks: Vec<PipelineAsnTask> =
                 tasks_raw.into_iter().map(PipelineAsnTask::from).collect();
-            let scanner = build_masscan_scanner(&engine);
+            let scanner = build_masscan_scanner(&merged_engine);
             scanner.check_masscan_available()?;
             let pipeline = MasscanPipeline::new(build_pipeline_options(
-                &engine,
+                &merged_engine,
                 &detect,
                 &cfg_merged,
                 speedtest.enabled,
@@ -1674,12 +2671,13 @@ async fn run_scan_command(cli: &Cli, cmd: ScanCmd) -> Result<()> {
             engine,
         } => {
             let cfg_merged = merge_scan_config(cli, &detect, Some(&speedtest))?;
+            let merged_engine = merge_engine_args(&engine, &cfg_merged);
             let tls = tls.unwrap_or(true);
             let port_str = port;
-            let scanner = build_masscan_scanner(&engine);
+            let scanner = build_masscan_scanner(&merged_engine);
             scanner.check_masscan_available()?;
             let pipeline = MasscanPipeline::new(build_pipeline_options(
-                &engine,
+                &merged_engine,
                 &detect,
                 &cfg_merged,
                 speedtest.enabled,
@@ -1707,16 +2705,17 @@ async fn run_scan_command(cli: &Cli, cmd: ScanCmd) -> Result<()> {
             engine,
         } => {
             let cfg_merged = merge_scan_config(cli, &detect, Some(&speedtest))?;
+            let merged_engine = merge_engine_args(&engine, &cfg_merged);
             let ips = MasscanScanner::read_ip_list_file(&filename)?;
             if ips.is_empty() {
                 anyhow::bail!("no IPs found in {}", filename.display());
             }
             let tls = tls.unwrap_or(true);
             let port_str = port;
-            let scanner = build_masscan_scanner(&engine);
+            let scanner = build_masscan_scanner(&merged_engine);
             scanner.check_masscan_available()?;
             let pipeline = MasscanPipeline::new(build_pipeline_options(
-                &engine,
+                &merged_engine,
                 &detect,
                 &cfg_merged,
                 speedtest.enabled,
@@ -2094,6 +3093,9 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match &cli.command {
+        Command::Init(args) => run_init_command(args),
+        Command::Config(ConfigCmd::Show) => run_config_show(&cli),
+        Command::Config(ConfigCmd::Get { key }) => run_config_get(&cli, key),
         Command::Detect(detect) => run_detect_command(&cli, detect.clone()).await,
         Command::SpeedTest(st) => run_speedtest_command(&cli, st.clone()).await,
         Command::Scan(scan) => run_scan_command(&cli, scan.clone()).await,
