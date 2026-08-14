@@ -1,6 +1,6 @@
 use crate::{
-    connector::{HandshakeType, PinnedConnector, PinnedHttpResponse},
     Result,
+    connector::{HandshakeType, PinnedConnector, PinnedHttpResponse},
     model::{Protocol, Target},
 };
 use http::{HeaderMap, StatusCode};
@@ -101,7 +101,9 @@ pub struct ProbeEngine {
 impl ProbeEngine {
     pub fn new(cfg: ProbeConfig) -> Self {
         let connector = cfg.build_pinned_connector().unwrap_or_else(|_| {
-            Arc::new(PinnedConnector::new(cfg.to_pinned()).expect("fallback pinned connector build"))
+            Arc::new(
+                PinnedConnector::new(cfg.to_pinned()).expect("fallback pinned connector build"),
+            )
         });
         Self { cfg, connector }
     }
@@ -123,13 +125,10 @@ impl ProbeEngine {
             } else {
                 sni.as_str()
             };
-            let resp = self.connector.https_get(
-                addr,
-                host,
-                host,
-                "/cdn-cgi/trace",
-                None,
-            ).await;
+            let resp = self
+                .connector
+                .https_get(addr, host, host, "/cdn-cgi/trace", None)
+                .await;
             match resp {
                 Ok(r) if r.status.is_success() || r.status.is_redirection() => {
                     let mut trait_found = false;
@@ -166,11 +165,11 @@ impl ProbeEngine {
         let addr = SocketAddr::new(target.ip, target.port);
         let resp: PinnedHttpResponse = match protocol {
             Protocol::Https => {
-                self.connector.https_get(addr, host, host, "/", None).await?
+                self.connector
+                    .https_get(addr, host, host, "/", None)
+                    .await?
             }
-            Protocol::Http => {
-                self.connector.http_get(addr, host, "/", None).await?
-            }
+            Protocol::Http => self.connector.http_get(addr, host, "/", None).await?,
         };
         Ok(analyze_headers(resp.status, &resp.headers))
     }
@@ -244,16 +243,15 @@ mod tests {
     #[test]
     fn analyze_headers_server_cloudflare() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "server",
-            HeaderValue::from_static("cloudflare"),
-        );
+        headers.insert("server", HeaderValue::from_static("cloudflare"));
         let probe = analyze_headers(StatusCode::OK, &headers);
         assert!(probe.cloudflare_trait);
-        assert!(probe
-            .reasons
-            .iter()
-            .any(|r| r.contains("Server header contains 'cloudflare'")));
+        assert!(
+            probe
+                .reasons
+                .iter()
+                .any(|r| r.contains("Server header contains 'cloudflare'"))
+        );
     }
 
     #[test]
@@ -270,10 +268,7 @@ mod tests {
         headers.insert("cf-ray", HeaderValue::from_static("abc123-LAX"));
         let probe = analyze_headers(StatusCode::FORBIDDEN, &headers);
         assert!(probe.cloudflare_trait);
-        assert!(probe
-            .reasons
-            .iter()
-            .any(|r| r.contains("CF-RAY header")));
+        assert!(probe.reasons.iter().any(|r| r.contains("CF-RAY header")));
         assert_eq!(probe.status, Some(StatusCode::FORBIDDEN));
     }
 

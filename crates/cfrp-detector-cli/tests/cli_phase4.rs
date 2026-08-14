@@ -1,8 +1,8 @@
+use figment::providers::Format;
+use serde::Deserialize;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
-use figment::providers::Format;
-use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct CfgShim {
@@ -46,7 +46,8 @@ tls_session_cache = 1024
 #[test]
 fn phase4_4_env_var_cfrp_concurrency_applied() {
     unsafe { std::env::set_var("CFRP_CONCURRENCY", "777") };
-    let figment = figment::Figment::new().merge(figment::providers::Env::prefixed("CFRP_").split("_"));
+    let figment =
+        figment::Figment::new().merge(figment::providers::Env::prefixed("CFRP_").split("_"));
     let v: Result<usize, _> = figment.extract_inner("concurrency");
     unsafe { std::env::remove_var("CFRP_CONCURRENCY") };
     match v {

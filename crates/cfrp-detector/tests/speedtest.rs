@@ -1,4 +1,6 @@
-use cfrp_detector::{ConnectorConfig, HandshakeType, SpeedTestConfig, SpeedTestResult, SpeedTester, Target};
+use cfrp_detector::{
+    ConnectorConfig, HandshakeType, SpeedTestConfig, SpeedTestResult, SpeedTester, Target,
+};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 

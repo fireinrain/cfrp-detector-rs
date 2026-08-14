@@ -29,10 +29,7 @@ fn multiple_v4_ranges_all_active() {
 
 #[test]
 fn multiple_v6_ranges_all_active() {
-    let r = CloudflareRanges::from(vec![
-        "2001:db8::/32".to_string(),
-        "fc00::/7".to_string(),
-    ]);
+    let r = CloudflareRanges::from(vec!["2001:db8::/32".to_string(), "fc00::/7".to_string()]);
     assert!(r.contains(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))));
     assert!(r.contains(IpAddr::V6(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1))));
     assert!(!r.contains(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb9, 0, 0, 0, 0, 0, 1))));

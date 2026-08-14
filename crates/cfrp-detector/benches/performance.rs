@@ -1,15 +1,16 @@
-use criterion::{
-    criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
 use cfrp_detector::{
+    DetectorError,
     connector::{ConnectorConfig, PinnedConnector},
     detector::DetectorConfig, // <--- 移除了 BatchTarget
-    governor::{GovernorSnapshot, MockFdCounter, ResourceGovernor, ResourceGovernorConfig, classify_resource_error},
+    governor::{
+        GovernorSnapshot, MockFdCounter, ResourceGovernor, ResourceGovernorConfig,
+        classify_resource_error,
+    },
     model::{BatchTarget, Target}, // <--- 将 BatchTarget 移到了这里
     probe::ProbeConfig,
     speedtest::SpeedTester,
-    DetectorError,
 };
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hint::black_box; // 替换 criterion::black_box
@@ -84,23 +85,19 @@ fn bench_governor_record_outcome(c: &mut Criterion) {
         let cfg = ResourceGovernorConfig::default();
         let mock = MockFdCounter::new(16, 1024);
         let gov = ResourceGovernor::new(cfg, mock);
-        group.bench_with_input(
-            BenchmarkId::new(format!("n_{}", n), n),
-            &n,
-            |b, &size| {
-                b.iter_custom(|iters| {
-                    let mut total = Duration::ZERO;
-                    for _i in 0..iters {
-                        let start = Instant::now();
-                        for j in 0..size {
-                            gov.record_outcome(black_box(j % 7 == 0));
-                        }
-                        total += start.elapsed();
+        group.bench_with_input(BenchmarkId::new(format!("n_{}", n), n), &n, |b, &size| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _i in 0..iters {
+                    let start = Instant::now();
+                    for j in 0..size {
+                        gov.record_outcome(black_box(j % 7 == 0));
                     }
-                    total
-                });
-            },
-        );
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
     }
     group.finish();
 }
@@ -195,13 +192,19 @@ fn bench_speedtest_config_helpers(c: &mut Criterion) {
 fn bench_rustls_config_construction(c: &mut Criterion) {
     c.bench_function("build_rustls_client_config_resume_no_0rtt", |b| {
         b.iter(|| {
-            let cfg = cfrp_detector::connector::build_rustls_client_config(black_box(true), black_box(false));
+            let cfg = cfrp_detector::connector::build_rustls_client_config(
+                black_box(true),
+                black_box(false),
+            );
             black_box(cfg)
         });
     });
     c.bench_function("build_rustls_client_config_resume_with_0rtt", |b| {
         b.iter(|| {
-            let cfg = cfrp_detector::connector::build_rustls_client_config(black_box(true), black_box(true));
+            let cfg = cfrp_detector::connector::build_rustls_client_config(
+                black_box(true),
+                black_box(true),
+            );
             black_box(cfg)
         });
     });
@@ -237,7 +240,10 @@ fn write_hint_go_baseline_comparison(path: &std::path::Path, rows: &[GoBaselineS
     };
     let mut buf = Vec::new();
     let _ = writeln!(buf, "# Go baseline comparison (hint)");
-    let _ = writeln!(buf, "# Compare criterion output with: go test -bench=. -benchmem > go.out");
+    let _ = writeln!(
+        buf,
+        "# Compare criterion output with: go test -bench=. -benchmem > go.out"
+    );
     let _ = writeln!(
         buf,
         "{:<45} {:>18} {:>18} {:>10}",
@@ -260,7 +266,8 @@ fn write_hint_go_baseline_comparison(path: &std::path::Path, rows: &[GoBaselineS
 }
 
 fn bench_go_baseline_harness(c: &mut Criterion) {
-    let hint_path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("go_baseline_hints.txt");
+    let hint_path =
+        std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("go_baseline_hints.txt");
     let _ = std::fs::create_dir_all(hint_path.parent().unwrap());
     let mut hints = Vec::<GoBaselineSnapshot>::new();
 

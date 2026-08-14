@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::{fmt, net::{IpAddr, SocketAddr}, str::FromStr, time::Duration};
+use std::{
+    fmt,
+    net::{IpAddr, SocketAddr},
+    str::FromStr,
+    time::Duration,
+};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Target {
@@ -240,7 +245,10 @@ mod tests {
     #[test]
     fn batch_target_construction() {
         let t = Target::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
-        let bt = BatchTarget { target: t.clone(), id: 0 };
+        let bt = BatchTarget {
+            target: t.clone(),
+            id: 0,
+        };
         assert_eq!(bt.target.ip, t.ip);
         assert_eq!(bt.target.port, t.port);
     }
@@ -282,7 +290,10 @@ mod tests {
 
     #[test]
     fn confidence_serde_uppercase() {
-        assert_eq!(serde_json::to_string(&Confidence::High).unwrap(), "\"HIGH\"");
+        assert_eq!(
+            serde_json::to_string(&Confidence::High).unwrap(),
+            "\"HIGH\""
+        );
         assert_eq!(serde_json::to_string(&Confidence::Low).unwrap(), "\"LOW\"");
         let c: Confidence = serde_json::from_str("\"MEDIUM\"").unwrap();
         assert_eq!(c, Confidence::Medium);
@@ -291,7 +302,10 @@ mod tests {
     #[test]
     fn protocol_serde_lowercase() {
         assert_eq!(serde_json::to_string(&Protocol::Http).unwrap(), "\"http\"");
-        assert_eq!(serde_json::to_string(&Protocol::Https).unwrap(), "\"https\"");
+        assert_eq!(
+            serde_json::to_string(&Protocol::Https).unwrap(),
+            "\"https\""
+        );
     }
 
     proptest! {

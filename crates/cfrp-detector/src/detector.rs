@@ -1,10 +1,10 @@
 use crate::{DetectorError, Result};
 use crate::{
-    cidr::CloudflareRanges,
     cidr::CidrSource,
+    cidr::CloudflareRanges,
     governor::{
-        classify_resource_error, GovernorSnapshot, ResourceGovernor, ResourceGovernorConfig,
-        SystemFdCounter,
+        GovernorSnapshot, ResourceGovernor, ResourceGovernorConfig, SystemFdCounter,
+        classify_resource_error,
     },
     location::{LocationSource, LocationStore},
     model::{BatchResult, BatchTarget, Confidence, DetectionResult, EdgeInfo, Protocol, Target},
@@ -100,7 +100,10 @@ impl Detector {
         let governor = if cfg.governor_enabled {
             let mut g_cfg = cfg.governor.clone();
             g_cfg.user_max_concurrency = cfg.max_concurrency.max(1);
-            Some(Arc::new(ResourceGovernor::new(g_cfg, Arc::new(SystemFdCounter))))
+            Some(Arc::new(ResourceGovernor::new(
+                g_cfg,
+                Arc::new(SystemFdCounter),
+            )))
         } else {
             None
         };
@@ -124,7 +127,10 @@ impl Detector {
         let governor = if cfg.governor_enabled {
             let mut g_cfg = cfg.governor.clone();
             g_cfg.user_max_concurrency = cfg.max_concurrency.max(1);
-            Some(Arc::new(ResourceGovernor::new(g_cfg, Arc::new(SystemFdCounter))))
+            Some(Arc::new(ResourceGovernor::new(
+                g_cfg,
+                Arc::new(SystemFdCounter),
+            )))
         } else {
             None
         };
@@ -157,9 +163,7 @@ impl Detector {
                 .push("IP is within official Cloudflare CIDR ranges".into());
         }
 
-        let tls = self.probe_engine
-            .tls_probe(target, domain)
-            .await?;
+        let tls = self.probe_engine.tls_probe(target, domain).await?;
         let (protocol, host) = match tls {
             Some(tls) => {
                 result.is_tls = true;
@@ -183,7 +187,10 @@ impl Detector {
                 domain.unwrap_or(&self.cfg.probe.default_sni).to_string(),
             ),
         };
-        let http = self.probe_engine.http_probe(target, protocol, &host).await?;
+        let http = self
+            .probe_engine
+            .http_probe(target, protocol, &host)
+            .await?;
         result.http_status_code = http.status.map(|s| s.as_u16());
         if http.cloudflare_trait {
             result.reasons.push(format!(
@@ -247,9 +254,13 @@ impl Detector {
         let started = std::time::Instant::now();
         let extra = HeaderMap::new();
         let response = if is_tls {
-            connector.https_get(addr, host, host, "/cdn-cgi/trace", Some(&extra)).await?
+            connector
+                .https_get(addr, host, host, "/cdn-cgi/trace", Some(&extra))
+                .await?
         } else {
-            connector.http_get(addr, host, "/cdn-cgi/trace", Some(&extra)).await?
+            connector
+                .http_get(addr, host, "/cdn-cgi/trace", Some(&extra))
+                .await?
         };
         let latency = started.elapsed();
         let body_str = String::from_utf8_lossy(&response.body);
@@ -276,8 +287,14 @@ impl Detector {
         domain: Option<&str>,
         concurrency: usize,
     ) -> Vec<BatchResult> {
-        self.detect_batch_with_progress(targets, domain, concurrency, AdaptiveConfig::default(), |_| {})
-            .await
+        self.detect_batch_with_progress(
+            targets,
+            domain,
+            concurrency,
+            AdaptiveConfig::default(),
+            |_| {},
+        )
+        .await
     }
 
     pub async fn detect_batch_with_cancel<F>(
@@ -302,7 +319,10 @@ impl Detector {
         }
         let max_limit = self.cfg.max_concurrency.max(1);
         let initial_raw = if adaptive.enabled {
-            adaptive.initial.clamp(adaptive.min, adaptive.max).min(max_limit)
+            adaptive
+                .initial
+                .clamp(adaptive.min, adaptive.max)
+                .min(max_limit)
         } else {
             base_concurrency.clamp(1, max_limit)
         };
@@ -474,11 +494,21 @@ impl Detector {
             })
             .collect();
 
-        let mut out: Vec<(usize, usize, Target, std::result::Result<DetectionResult, DetectorError>)> = Vec::with_capacity(total);
+        let mut out: Vec<(
+            usize,
+            usize,
+            Target,
+            std::result::Result<DetectionResult, DetectorError>,
+        )> = Vec::with_capacity(total);
         let mut last_reported = 0usize;
         let mut cancelled_raised = false;
-        let mut result_by_idx: Vec<Option<(usize, Target, std::result::Result<DetectionResult, DetectorError>)>> =
-            (0..total).map(|_| None).collect();
+        let mut result_by_idx: Vec<
+            Option<(
+                usize,
+                Target,
+                std::result::Result<DetectionResult, DetectorError>,
+            )>,
+        > = (0..total).map(|_| None).collect();
         for task in tasks {
             if cancel.is_cancelled() && !cancelled_raised {
                 cancelled_raised = true;
@@ -504,7 +534,9 @@ impl Detector {
                         let (throttled, feedback) = if let Some(s) = snap_guard.as_ref() {
                             (
                                 s.throttled_due_to_fd || s.throttled_due_to_resource_errors,
-                                GovernorFeedback { snapshot: Some(s.clone()) },
+                                GovernorFeedback {
+                                    snapshot: Some(s.clone()),
+                                },
                             )
                         } else {
                             (false, GovernorFeedback::default())
@@ -534,7 +566,9 @@ impl Detector {
                     idx,
                     bt.id,
                     bt.target.clone(),
-                    Err(DetectorError::Http("cancelled by shutdown (gap fill)".into())),
+                    Err(DetectorError::Http(
+                        "cancelled by shutdown (gap fill)".into(),
+                    )),
                 )),
             }
         }
@@ -550,10 +584,7 @@ impl Detector {
             .collect()
     }
 
-    pub async fn detect_oneshot(
-        target: &Target,
-        domain: Option<&str>,
-    ) -> Result<DetectionResult> {
+    pub async fn detect_oneshot(target: &Target, domain: Option<&str>) -> Result<DetectionResult> {
         let detector = Self::new(DetectorConfig::default()).await?;
         detector.detect(target, domain).await
     }
@@ -579,7 +610,10 @@ impl Detector {
         }
         let max_limit = self.cfg.max_concurrency.max(1);
         let initial_raw = if adaptive.enabled {
-            adaptive.initial.clamp(adaptive.min, adaptive.max).min(max_limit)
+            adaptive
+                .initial
+                .clamp(adaptive.min, adaptive.max)
+                .min(max_limit)
         } else {
             base_concurrency.clamp(1, max_limit)
         };
@@ -634,11 +668,30 @@ impl Detector {
                                 *c += 1;
                                 p
                             };
-                            return (prev, idx, bt_id, target, Err(DetectorError::Http("semaphore closed".into())));
+                            return (
+                                prev,
+                                idx,
+                                bt_id,
+                                target,
+                                Err(DetectorError::Http("semaphore closed".into())),
+                            );
                         }
                     };
-                    let dom = if domain_ref.is_empty() { None } else { Some(domain_ref.as_ref()) };
-                    let result = detect_impl(&ranges, &locations, &cfg, &probe_engine, governor.as_deref(), &target, dom).await;
+                    let dom = if domain_ref.is_empty() {
+                        None
+                    } else {
+                        Some(domain_ref.as_ref())
+                    };
+                    let result = detect_impl(
+                        &ranges,
+                        &locations,
+                        &cfg,
+                        &probe_engine,
+                        governor.as_deref(),
+                        &target,
+                        dom,
+                    )
+                    .await;
                     let ok = result.is_ok();
                     if gov_enabled {
                         if let Err(ref e) = result {
@@ -667,22 +720,23 @@ impl Detector {
                     if adaptive_c.enabled || gov_enabled {
                         let r = recent_c.lock();
                         let n = r.len();
-                        let mut proposed: usize = if adaptive_c.enabled && n >= adaptive_c.window.min(3) {
-                            let successes = r.iter().filter(|&&x| x).count();
-                            let rate = successes as f64 / n as f64;
-                            let cur = *limit_c.lock();
-                            let mut new_limit = cur;
-                            if rate >= 0.85 {
-                                new_limit = (cur as f64 * 1.25).ceil() as usize;
-                            } else if rate <= 0.35 {
-                                new_limit = (cur as f64 * 0.5).floor() as usize;
-                            }
-                            let clamp_lo = adaptive_c.min.max(1);
-                            let clamp_hi = adaptive_c.max.min(max_limit_c);
-                            new_limit.clamp(clamp_lo, clamp_hi).max(1)
-                        } else {
-                            *limit_c.lock()
-                        };
+                        let mut proposed: usize =
+                            if adaptive_c.enabled && n >= adaptive_c.window.min(3) {
+                                let successes = r.iter().filter(|&&x| x).count();
+                                let rate = successes as f64 / n as f64;
+                                let cur = *limit_c.lock();
+                                let mut new_limit = cur;
+                                if rate >= 0.85 {
+                                    new_limit = (cur as f64 * 1.25).ceil() as usize;
+                                } else if rate <= 0.35 {
+                                    new_limit = (cur as f64 * 0.5).floor() as usize;
+                                }
+                                let clamp_lo = adaptive_c.min.max(1);
+                                let clamp_hi = adaptive_c.max.min(max_limit_c);
+                                new_limit.clamp(clamp_lo, clamp_hi).max(1)
+                            } else {
+                                *limit_c.lock()
+                            };
                         if !adaptive_c.enabled {
                             proposed = proposed.clamp(1, max_limit_c);
                         }
@@ -718,7 +772,12 @@ impl Detector {
             })
             .collect();
 
-        let mut out: Vec<(usize, usize, Target, std::result::Result<DetectionResult, DetectorError>)> = Vec::with_capacity(total);
+        let mut out: Vec<(
+            usize,
+            usize,
+            Target,
+            std::result::Result<DetectionResult, DetectorError>,
+        )> = Vec::with_capacity(total);
         let mut last_reported = 0usize;
         for task in tasks {
             match task.await {
@@ -734,7 +793,9 @@ impl Detector {
                         let (throttled, feedback) = if let Some(s) = snap_guard.as_ref() {
                             (
                                 s.throttled_due_to_fd || s.throttled_due_to_resource_errors,
-                                GovernorFeedback { snapshot: Some(s.clone()) },
+                                GovernorFeedback {
+                                    snapshot: Some(s.clone()),
+                                },
                             )
                         } else {
                             (false, GovernorFeedback::default())
@@ -787,9 +848,7 @@ async fn detect_impl(
             .push("IP is within official Cloudflare CIDR ranges".into());
     }
 
-    let tls = probe_engine
-        .tls_probe(target, domain)
-        .await?;
+    let tls = probe_engine.tls_probe(target, domain).await?;
     let (protocol, host) = match tls {
         Some(tls) => {
             result.is_tls = true;
@@ -838,9 +897,7 @@ async fn detect_impl(
         _ => Confidence::None,
     };
     result.confidence_reason = match result.confidence {
-        Confidence::High => {
-            "IP belongs to Cloudflare and shows application-level traits".into()
-        }
+        Confidence::High => "IP belongs to Cloudflare and shows application-level traits".into(),
         Confidence::Medium => {
             "IP belongs to Cloudflare ranges, but active service traits are limited".into()
         }
@@ -864,9 +921,13 @@ async fn detect_impl(
         let started = std::time::Instant::now();
         let extra = HeaderMap::new();
         let response = if result.is_tls {
-            connector.https_get(addr, &host, &host, "/cdn-cgi/trace", Some(&extra)).await?
+            connector
+                .https_get(addr, &host, &host, "/cdn-cgi/trace", Some(&extra))
+                .await?
         } else {
-            connector.http_get(addr, &host, "/cdn-cgi/trace", Some(&extra)).await?
+            connector
+                .http_get(addr, &host, "/cdn-cgi/trace", Some(&extra))
+                .await?
         };
         let latency = started.elapsed();
         let body_str = String::from_utf8_lossy(&response.body);
@@ -925,7 +986,10 @@ mod tests {
         let cfg = DetectorConfig::default();
         assert_eq!(cfg.probe.connect_timeout, Duration::from_secs(2));
         assert_eq!(cfg.max_concurrency, 256);
-        assert_eq!(cfg.cache.directory, std::path::PathBuf::from("data/cfrpdata"));
+        assert_eq!(
+            cfg.cache.directory,
+            std::path::PathBuf::from("data/cfrpdata")
+        );
     }
 
     #[test]
@@ -943,9 +1007,7 @@ mod tests {
 
     #[test]
     fn detector_with_data_sources_builds_struct() {
-        let client = reqwest::Client::builder()
-            .build()
-            .expect("client build");
+        let client = reqwest::Client::builder().build().expect("client build");
         let ranges = CloudflareRanges::empty();
         let locations: Arc<dyn LocationSource> = Arc::new(EmptyLocationSource);
         let cfg = DetectorConfig::default();
@@ -971,7 +1033,9 @@ mod tests {
         let mut r = DetectionResult::default();
         r.confidence = Confidence::High;
         r.confidence_reason = match r.confidence {
-            Confidence::High => "IP belongs to Cloudflare and shows application-level traits".into(),
+            Confidence::High => {
+                "IP belongs to Cloudflare and shows application-level traits".into()
+            }
             _ => "".into(),
         };
         assert!(r.confidence_reason.contains("application-level traits"));
@@ -981,7 +1045,9 @@ mod tests {
     fn detection_result_confidence_reason_medium() {
         let reason = match Confidence::Medium {
             Confidence::High => "",
-            Confidence::Medium => "IP belongs to Cloudflare ranges, but active service traits are limited".into(),
+            Confidence::Medium => {
+                "IP belongs to Cloudflare ranges, but active service traits are limited".into()
+            }
             _ => "".into(),
         };
         assert!(reason.contains("ranges, but active service traits are limited"));
@@ -990,7 +1056,9 @@ mod tests {
     #[test]
     fn detection_result_confidence_reason_low() {
         let reason: String = match Confidence::Low {
-            Confidence::Low => "IP is outside official ranges but exhibits Cloudflare application traits".into(),
+            Confidence::Low => {
+                "IP is outside official ranges but exhibits Cloudflare application traits".into()
+            }
             _ => String::new(),
         };
         assert!(reason.contains("exhibits Cloudflare application traits"));
@@ -999,7 +1067,9 @@ mod tests {
     #[test]
     fn detection_result_confidence_reason_none() {
         let reason: String = match Confidence::None {
-            Confidence::None => "IP is outside Cloudflare ranges and no Cloudflare traits were detected".into(),
+            Confidence::None => {
+                "IP is outside Cloudflare ranges and no Cloudflare traits were detected".into()
+            }
             _ => String::new(),
         };
         assert!(reason.contains("no Cloudflare traits were detected"));
@@ -1040,9 +1110,18 @@ mod tests {
 
     #[test]
     fn extract_colo_case_and_ws_insensitive() {
-        assert_eq!(extract_colo_from_trace("  colo=lax  \n").as_deref(), Some("LAX"));
-        assert_eq!(extract_colo_from_trace("\ncolo=NRT\n").as_deref(), Some("NRT"));
-        assert_eq!(extract_colo_from_trace("foo=bar\r\ncolo=  lax  \r\n").as_deref(), Some("LAX"));
+        assert_eq!(
+            extract_colo_from_trace("  colo=lax  \n").as_deref(),
+            Some("LAX")
+        );
+        assert_eq!(
+            extract_colo_from_trace("\ncolo=NRT\n").as_deref(),
+            Some("NRT")
+        );
+        assert_eq!(
+            extract_colo_from_trace("foo=bar\r\ncolo=  lax  \r\n").as_deref(),
+            Some("LAX")
+        );
     }
 
     #[test]

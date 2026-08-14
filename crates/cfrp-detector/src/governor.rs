@@ -77,7 +77,10 @@ impl FdCounter for SystemFdCounter {
 
 fn rlimit_nofile_soft() -> Option<usize> {
     unsafe {
-        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
             Some(rlim.rlim_cur as usize)
         } else {
@@ -223,7 +226,9 @@ impl ResourceGovernor {
             fd_used as f64 / fd_limit as f64
         };
         let error_ratio = self.resource_error_ratio();
-        let mut capped = proposed.min(fd_budget).min(self.config.user_max_concurrency);
+        let mut capped = proposed
+            .min(fd_budget)
+            .min(self.config.user_max_concurrency);
         let mut throttled_due_to_fd = capped < proposed;
 
         if let Some(hard) = self.config.fd_ratio_hard_cap {
@@ -474,7 +479,11 @@ mod tests {
         }
         assert!(gov.resource_error_ratio() > 0.10);
         let (capped, snap) = gov.cap_concurrency(100);
-        assert!(snap.throttled_due_to_resource_errors, "expected resource error throttle, snap={:?}", snap);
+        assert!(
+            snap.throttled_due_to_resource_errors,
+            "expected resource error throttle, snap={:?}",
+            snap
+        );
         assert!(capped < 100);
         assert!(capped >= 1);
     }

@@ -39,7 +39,10 @@ fn detector_cfg_clone_keeps_values() {
 #[test]
 fn with_data_sources_instantiates() {
     let d = empty_detector();
-    assert_eq!(d.cfg.max_concurrency, DetectorConfig::default().max_concurrency);
+    assert_eq!(
+        d.cfg.max_concurrency,
+        DetectorConfig::default().max_concurrency
+    );
 }
 
 #[test]

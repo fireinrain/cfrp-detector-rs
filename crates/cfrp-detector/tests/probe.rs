@@ -32,7 +32,10 @@ fn target_struct_port_stored_correctly() {
 #[test]
 fn header_map_construction_case_insensitive_lookup() {
     let mut h = HeaderMap::new();
-    h.insert(HeaderName::from_static("cf-ray"), HeaderValue::from_static("a-LAX"));
+    h.insert(
+        HeaderName::from_static("cf-ray"),
+        HeaderValue::from_static("a-LAX"),
+    );
     assert!(h.get("cf-ray").is_some());
     assert!(h.get("CF-RAY").is_some());
     assert!(h.get("Cf-Ray").is_some());

@@ -1,15 +1,16 @@
 use crate::{
+    DetectorError, Result,
     connector::{ConnectorConfig, HandshakeType, PinnedConnector, Timing},
-    DetectorError, Result, model::Target,
+    model::Target,
 };
 use futures::stream::{self, StreamExt};
 use http::HeaderMap;
+use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     sync::Arc,
     time::{Duration, Instant},
 };
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct SpeedTestConfig {
@@ -60,7 +61,12 @@ pub struct SpeedTester {
 }
 
 impl SpeedTester {
-    pub fn new(connector_cfg: ConnectorConfig, use_tls: bool, sni: impl Into<String>, host: impl Into<String>) -> Result<Self> {
+    pub fn new(
+        connector_cfg: ConnectorConfig,
+        use_tls: bool,
+        sni: impl Into<String>,
+        host: impl Into<String>,
+    ) -> Result<Self> {
         let connector = PinnedConnector::new(connector_cfg)?;
         Ok(Self {
             connector: Arc::new(connector),
@@ -70,7 +76,12 @@ impl SpeedTester {
         })
     }
 
-    pub fn with_connector(connector: Arc<PinnedConnector>, use_tls: bool, sni: impl Into<String>, host: impl Into<String>) -> Self {
+    pub fn with_connector(
+        connector: Arc<PinnedConnector>,
+        use_tls: bool,
+        sni: impl Into<String>,
+        host: impl Into<String>,
+    ) -> Self {
         Self {
             connector,
             use_tls,
@@ -101,7 +112,8 @@ impl SpeedTester {
         if self.use_tls {
             let dl = tokio::time::timeout(
                 timeout,
-                self.connector.https_download(addr, &self.sni, &self.host, path, extra_headers),
+                self.connector
+                    .https_download(addr, &self.sni, &self.host, path, extra_headers),
             )
             .await
             .map_err(|_| DetectorError::Http("speedtest timed out".into()))??;
@@ -111,7 +123,8 @@ impl SpeedTester {
         } else {
             let dl = tokio::time::timeout(
                 timeout,
-                self.connector.http_download(addr, &self.host, path, extra_headers),
+                self.connector
+                    .http_download(addr, &self.host, path, extra_headers),
             )
             .await
             .map_err(|_| DetectorError::Http("speedtest timed out".into()))??;
@@ -185,7 +198,10 @@ impl SpeedTester {
         } else {
             total.saturating_mul(1_000_000_000) / elapsed.as_nanos() as u64
         };
-        let ttfb = first_byte.lock().clone().and_then(|d| if d.is_zero() { None } else { Some(d) });
+        let ttfb = first_byte
+            .lock()
+            .clone()
+            .and_then(|d| if d.is_zero() { None } else { Some(d) });
         let mut result = SpeedTestResult {
             target: target.clone(),
             bytes_per_second: bps,
@@ -209,7 +225,9 @@ impl SpeedTester {
     ) -> Result<SpeedTestResult> {
         let addr = SocketAddr::new(target.ip, target.port);
         let extra = HeaderMap::new();
-        let _warmup = self.download_once(addr, path, cfg.timeout, Some(&extra)).await?;
+        let _warmup = self
+            .download_once(addr, path, cfg.timeout, Some(&extra))
+            .await?;
         self.test(target, path, cfg).await
     }
 
@@ -280,7 +298,9 @@ impl SpeedTester {
                                     *g = Some(send_started.elapsed());
                                 }
                             }
-                            Ok::<(u64, Timing, Option<HandshakeType>), DetectorError>((bytes, timing, hs))
+                            Ok::<(u64, Timing, Option<HandshakeType>), DetectorError>((
+                                bytes, timing, hs,
+                            ))
                         }));
                     }
                     let mut total = 0u64;
@@ -306,7 +326,10 @@ impl SpeedTester {
                     } else {
                         total.saturating_mul(1_000_000_000) / elapsed.as_nanos() as u64
                     };
-                    let ttfb = first_byte.lock().clone().and_then(|d| if d.is_zero() { None } else { Some(d) });
+                    let ttfb = first_byte
+                        .lock()
+                        .clone()
+                        .and_then(|d| if d.is_zero() { None } else { Some(d) });
                     let mut result = SpeedTestResult {
                         target,
                         bytes_per_second: bps,

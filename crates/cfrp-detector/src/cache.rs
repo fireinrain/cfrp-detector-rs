@@ -86,9 +86,10 @@ impl FileCache {
         }
 
         let attempts = policy.max_attempts;
-        let source = Box::new(last_err.unwrap_or_else(|| {
-            DetectorError::DataSource("unknown error after retries".into())
-        }));
+        let source =
+            Box::new(last_err.unwrap_or_else(|| {
+                DetectorError::DataSource("unknown error after retries".into())
+            }));
         Err(DetectorError::RetriesExceeded { source, attempts })
     }
 

@@ -1,7 +1,7 @@
 use cfrp_detector::{
     BatchResult, BatchTarget, Confidence, DetectionResult, EdgeInfo, Protocol, Target,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 

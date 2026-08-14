@@ -35,12 +35,15 @@ impl AsnTask {
                 "invalid ASN task line: {line}, expected format ASN:PORT:TLS"
             )));
         }
-        let asn = parts[0]
-            .parse::<u32>()
-            .map_err(|_| DetectorError::InvalidTarget(format!("invalid ASN number: {}", parts[0])))?;
+        let asn = parts[0].parse::<u32>().map_err(|_| {
+            DetectorError::InvalidTarget(format!("invalid ASN number: {}", parts[0]))
+        })?;
         let ports = parts[1].to_string();
         let tls_raw = parts[2].trim();
-        let tls = matches!(tls_raw, "1" | "true" | "True" | "TRUE" | "yes" | "YES" | "Y" | "y");
+        let tls = matches!(
+            tls_raw,
+            "1" | "true" | "True" | "TRUE" | "yes" | "YES" | "Y" | "y"
+        );
         Ok(Self { asn, ports, tls })
     }
 }
@@ -105,7 +108,8 @@ impl MasscanScanner {
 
     pub fn check_masscan_available(&self) -> Result<PathBuf> {
         let cmd = self.resolve_masscan_cmd();
-        let is_local = cmd.is_relative() || cmd.parent().is_some() && cmd != PathBuf::from("masscan");
+        let is_local =
+            cmd.is_relative() || cmd.parent().is_some() && cmd != PathBuf::from("masscan");
         if is_local && cmd.exists() {
             return Ok(cmd);
         }
@@ -130,14 +134,15 @@ impl MasscanScanner {
 
     #[cfg(target_os = "linux")]
     pub fn list_interfaces() -> Result<Vec<NetworkInterface>> {
-        let content = std::fs::read_to_string("/proc/net/dev")
-            .map_err(|e| DetectorError::Io(e))?;
+        let content = std::fs::read_to_string("/proc/net/dev").map_err(|e| DetectorError::Io(e))?;
         let mut out = Vec::new();
         for line in content.lines().skip(2) {
             if let Some((name, _rest)) = line.split_once(':') {
                 let trimmed = name.trim();
                 if !trimmed.is_empty() && trimmed != "lo" {
-                    out.push(NetworkInterface { name: trimmed.to_string() });
+                    out.push(NetworkInterface {
+                        name: trimmed.to_string(),
+                    });
                 }
             }
         }
@@ -147,12 +152,13 @@ impl MasscanScanner {
     #[cfg(not(target_os = "linux"))]
     pub fn list_interfaces() -> Result<Vec<NetworkInterface>> {
         use std::net::UdpSocket;
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .map_err(|e| DetectorError::Io(e))?;
+        let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| DetectorError::Io(e))?;
         let local_addr = socket.local_addr().map_err(|e| DetectorError::Io(e))?;
         let ip = local_addr.ip();
         let _ = ip;
-        Ok(vec![NetworkInterface { name: "default".into() }])
+        Ok(vec![NetworkInterface {
+            name: "default".into(),
+        }])
     }
 
     pub fn resolve_interface(&self) -> Result<String> {
@@ -169,7 +175,9 @@ impl MasscanScanner {
         }
         let ifaces = Self::list_interfaces()?;
         match ifaces.len() {
-            0 => Err(DetectorError::DataSource("no network interfaces detected".into())),
+            0 => Err(DetectorError::DataSource(
+                "no network interfaces detected".into(),
+            )),
             1 => Ok(ifaces[0].name.clone()),
             _ => Err(DetectorError::DataSource(format!(
                 "multiple network interfaces detected ({:?}); please set --interface or write the name to {}",
@@ -211,26 +219,18 @@ impl MasscanScanner {
             .send()
             .await
             .map_err(|e| DetectorError::Network(e))?;
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| DetectorError::Network(e))?;
+        let html = resp.text().await.map_err(|e| DetectorError::Network(e))?;
         let cidrs = parse_ipip_asn_html(&html, asn);
         let content = cidrs.join("\n");
         std::fs::write(&cache_file, content)?;
         Ok(cidrs)
     }
 
-    pub async fn scan_cidrs(
-        &self,
-        cidrs: &[String],
-        ports: &str,
-    ) -> Result<Vec<OpenPort>> {
+    pub async fn scan_cidrs(&self, cidrs: &[String], ports: &str) -> Result<Vec<OpenPort>> {
         if cidrs.is_empty() {
             return Ok(Vec::new());
         }
-        let tmp_ipl = tempfile::NamedTempFile::new()
-            .map_err(|e| DetectorError::Io(e))?;
+        let tmp_ipl = tempfile::NamedTempFile::new().map_err(|e| DetectorError::Io(e))?;
         let ipl_path = tmp_ipl.path().to_path_buf();
         let data = cidrs.join("\n");
         std::fs::write(&ipl_path, data)?;
@@ -240,16 +240,11 @@ impl MasscanScanner {
         Ok(result)
     }
 
-    pub async fn scan_ips(
-        &self,
-        ips: &[IpAddr],
-        ports: &str,
-    ) -> Result<Vec<OpenPort>> {
+    pub async fn scan_ips(&self, ips: &[IpAddr], ports: &str) -> Result<Vec<OpenPort>> {
         if ips.is_empty() {
             return Ok(Vec::new());
         }
-        let tmp_ipl = tempfile::NamedTempFile::new()
-            .map_err(|e| DetectorError::Io(e))?;
+        let tmp_ipl = tempfile::NamedTempFile::new().map_err(|e| DetectorError::Io(e))?;
         let ipl_path = tmp_ipl.path().to_path_buf();
         let data: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
         std::fs::write(&ipl_path, data.join("\n"))?;
@@ -259,11 +254,7 @@ impl MasscanScanner {
         Ok(result)
     }
 
-    pub async fn scan_single_ip(
-        &self,
-        ip: IpAddr,
-        ports: &str,
-    ) -> Result<Vec<OpenPort>> {
+    pub async fn scan_single_ip(&self, ip: IpAddr, ports: &str) -> Result<Vec<OpenPort>> {
         let output_path = self.run_masscan(None, Some(&ip.to_string()), ports)?;
         let result = parse_masscan_output(&output_path)?;
         let _ = std::fs::remove_file(output_path);
@@ -278,12 +269,9 @@ impl MasscanScanner {
     ) -> Result<PathBuf> {
         let binary = self.check_masscan_available()?;
         let iface = self.resolve_interface()?;
-        let output = tempfile::NamedTempFile::new()
-            .map_err(|e| DetectorError::Io(e))?;
+        let output = tempfile::NamedTempFile::new().map_err(|e| DetectorError::Io(e))?;
         let output_path = output.into_temp_path();
-        let persist_path = output_path
-            .keep()
-            .map_err(|e| DetectorError::Io(e.error))?;
+        let persist_path = output_path.keep().map_err(|e| DetectorError::Io(e.error))?;
 
         let mut cmd = Command::new(&binary);
         cmd.arg("-p").arg(ports);
@@ -314,8 +302,7 @@ impl MasscanScanner {
     }
 
     pub fn read_ip_list_file(path: &Path) -> Result<Vec<IpAddr>> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| DetectorError::Io(e))?;
+        let content = std::fs::read_to_string(path).map_err(|e| DetectorError::Io(e))?;
         let mut out = Vec::new();
         for line in content.lines() {
             let trimmed = line.split('#').next().unwrap_or("").trim();
@@ -331,8 +318,7 @@ impl MasscanScanner {
     }
 
     pub fn read_asn_task_file(path: &Path) -> Result<Vec<AsnTask>> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| DetectorError::Io(e))?;
+        let content = std::fs::read_to_string(path).map_err(|e| DetectorError::Io(e))?;
         let mut out = Vec::new();
         for (i, line) in content.lines().enumerate() {
             let trimmed = line.split('#').next().unwrap_or("").trim();
@@ -355,7 +341,8 @@ fn parse_ipip_asn_html(html: &str, asn: u32) -> Vec<String> {
     for line in html.lines() {
         for segment in line.split_whitespace() {
             if segment.contains(&needle) {
-                let cleaned = segment.trim_matches(|c: char| c == '"' || c == '\'' || c == '>' || c == '<');
+                let cleaned =
+                    segment.trim_matches(|c: char| c == '"' || c == '\'' || c == '>' || c == '<');
                 if let Some(idx) = cleaned.find(&needle) {
                     let after = &cleaned[idx + needle.len()..];
                     let cidr_candidate: String = after
@@ -856,7 +843,10 @@ open tcp 8443 104.17.200.10 1710000001
     #[test]
     fn list_interfaces_linux_parses_proc_net_dev() {
         let ifaces = MasscanScanner::list_interfaces().unwrap();
-        assert!(!ifaces.is_empty(), "expected at least one network interface");
+        assert!(
+            !ifaces.is_empty(),
+            "expected at least one network interface"
+        );
         for iface in &ifaces {
             assert_ne!(iface.name, "lo");
             assert!(!iface.name.is_empty());

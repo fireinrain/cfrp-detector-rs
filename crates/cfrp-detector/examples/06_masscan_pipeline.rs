@@ -12,12 +12,11 @@
 //!   • 单 ASN 扫描: 扫描 AS13335 (Cloudflare) 的 443 端口
 //!   • 不实际探测 (演示参数构造流程 + 运行入口)
 
+use cfrp_detector::{
+    MasscanConfig, MasscanPipeline, MasscanScanner, PipelineAsnTask, PipelineOptions,
+};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use cfrp_detector::{
-    MasscanConfig, MasscanScanner, MasscanPipeline, PipelineAsnTask,
-    PipelineOptions,
-};
 
 fn main() -> anyhow::Result<()> {
     // ======= 0. 环境自检 (帮助用户 debug 常见问题) =======
@@ -41,9 +40,9 @@ fn main() -> anyhow::Result<()> {
     let mut mcfg = MasscanConfig::new();
     // 如果系统中 masscan 不在 PATH, 可改这里:
     // mcfg.masscan_binary_path = Some(PathBuf::from("/usr/local/sbin/masscan"));
-    mcfg.rate = 10_000;                 // 10k pps, 示例慢一点避免触发网络告警
-    mcfg.wait_seconds = 5;              // 发包后等待 5s 接收回包
-    mcfg.asn_cache_dir   = PathBuf::from("./_example_asn_cache");
+    mcfg.rate = 10_000; // 10k pps, 示例慢一点避免触发网络告警
+    mcfg.wait_seconds = 5; // 发包后等待 5s 接收回包
+    mcfg.asn_cache_dir = PathBuf::from("./_example_asn_cache");
     mcfg.iface_setting_file = PathBuf::from("./_example_iface.txt");
     // interface: None 让 Scanner 自动探测并写入 iface_setting_file
 
@@ -59,7 +58,9 @@ fn main() -> anyhow::Result<()> {
         Ok(path) => println!("✅ masscan 可执行: {}\n", path.display()),
         Err(e) => {
             println!("❌ masscan 不可用: {e}");
-            println!("   请安装 masscan: macOS → brew install masscan ; Debian/Ubuntu → apt install masscan\n");
+            println!(
+                "   请安装 masscan: macOS → brew install masscan ; Debian/Ubuntu → apt install masscan\n"
+            );
             // 仅示例, 不直接 panic 返回, 让用户看到下面的配置演示
             return Ok(());
         }
@@ -69,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     let popts = PipelineOptions {
         domain: Some("cloudflare.com".to_string()),
         concurrency: 50,
-        speedtest: false,                       // 示例关闭测速, 只开+存端口
+        speedtest: false, // 示例关闭测速, 只开+存端口
         speedtest_threads: 3,
         speedtest_url_path: "/cdn-cgi/trace".into(),
         speedtest_concurrency: 8,
@@ -94,7 +95,8 @@ fn main() -> anyhow::Result<()> {
     //       通过环境变量 CFRP_EXAMPLE_RUN=1 时才真实运行, 否则只做 dry-run 打印
 
     let should_run = std::env::var("CFRP_EXAMPLE_RUN")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     if !should_run {
         println!();
@@ -102,20 +104,33 @@ fn main() -> anyhow::Result<()> {
         println!(" 🔕 DRY-RUN 模式: 未设置 CFRP_EXAMPLE_RUN=1");
         println!("    将不执行真正的 masscan 发包, 仅打印任务参数.");
         println!("    如要真实扫描并检测, 请执行:");
-        println!("      sudo -E CFRP_EXAMPLE_RUN=1 \\\n        cargo run --example 06_masscan_pipeline -p cfrp-detector");
+        println!(
+            "      sudo -E CFRP_EXAMPLE_RUN=1 \\\n        cargo run --example 06_masscan_pipeline -p cfrp-detector"
+        );
         println!("──────────────────────────────────────────────────\n");
 
         // A. 构造一个单 IP 扫描任务 (Dry run: 打印预期命令参数)
         let demo_ip = std::net::IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
-        println!("📝 Task A · run_single_ip(ip={}, ports=\"443\", tls=true) [Dry-run]", demo_ip);
+        println!(
+            "📝 Task A · run_single_ip(ip={}, ports=\"443\", tls=true) [Dry-run]",
+            demo_ip
+        );
         println!("   → masscan 将会合成命令行, 扫描该 IP 443 端口");
         println!("   → 结果写入 {}/", popts.output_dir.display());
         println!("   → 然后对 open ports 执行 Cloudflare 检测\n");
 
         // B. 构造一个批量 ASN 任务列表 (Dry run)
         let batch = vec![
-            PipelineAsnTask { asn: 13335, ports: "443".to_string(), tls: true },     // Cloudflare
-            PipelineAsnTask { asn: 132203, ports: "443,8443".to_string(), tls: true }, // Tencent Cloud
+            PipelineAsnTask {
+                asn: 13335,
+                ports: "443".to_string(),
+                tls: true,
+            }, // Cloudflare
+            PipelineAsnTask {
+                asn: 132203,
+                ports: "443,8443".to_string(),
+                tls: true,
+            }, // Tencent Cloud
         ];
         println!("📝 Task B · run_batch_asn 任务列表 [Dry-run]:");
         for t in &batch {
@@ -132,22 +147,28 @@ fn main() -> anyhow::Result<()> {
 
         // D. 演示: 清除 cache API
         println!("🧹 清除缓存命令 (不会真执行, 仅显示调用):");
-        println!("   cfrp_detector::clear_cache(\n     asn_dir = {},\n     setting = {} )",
-            mcfg.asn_cache_dir.display(), mcfg.iface_setting_file.display());
+        println!(
+            "   cfrp_detector::clear_cache(\n     asn_dir = {},\n     setting = {} )",
+            mcfg.asn_cache_dir.display(),
+            mcfg.iface_setting_file.display()
+        );
         return Ok(());
     }
 
     // ====== 真实执行 (CFRP_EXAMPLE_RUN=1) ======
     println!("\n🚀 开始真实执行 run_single_ip(1.1.1.1, ports=443, tls=true)...");
-    println!("   预计用时: ~{}s (发包 wait + 检测)\n", mcfg.wait_seconds + 10);
+    println!(
+        "   预计用时: ~{}s (发包 wait + 检测)\n",
+        mcfg.wait_seconds + 10
+    );
 
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4).enable_all().build()?;
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
 
     let demo_ip = std::net::IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
-    let res = rt.block_on(async {
-        pipeline.run_single_ip(&scanner, demo_ip, "443", true).await
-    });
+    let res = rt.block_on(async { pipeline.run_single_ip(&scanner, demo_ip, "443", true).await });
 
     match res {
         Ok(out) => {

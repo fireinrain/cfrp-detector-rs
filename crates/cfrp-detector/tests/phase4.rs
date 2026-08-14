@@ -1,12 +1,14 @@
 mod support;
 
-use support::{MockCfServer, MockCfServerConfig, StaticLocations, StaticRanges, make_detector_with_mocks};
 use cfrp_detector::{
     AdaptiveConfig, BatchTarget, CidrSource, Confidence, ConnectorConfig, DetectorConfig,
     LocationSource, SpeedTestConfig, SpeedTester,
 };
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
+use support::{
+    MockCfServer, MockCfServerConfig, StaticLocations, StaticRanges, make_detector_with_mocks,
+};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
@@ -29,10 +31,20 @@ async fn phase4_1_detect_in_cidr_high_confidence() {
         .await
         .unwrap();
     assert!(result.is_cloudflare_edge, "should be cloudflare edge");
-    assert_eq!(result.confidence, Confidence::High, "expected HIGH confidence for in-range + CF headers");
+    assert_eq!(
+        result.confidence,
+        Confidence::High,
+        "expected HIGH confidence for in-range + CF headers"
+    );
     assert!(result.edge_info.is_some(), "edge info should be populated");
-    assert_eq!(result.edge_info.as_ref().unwrap().colo_code.as_deref(), Some("LAX"));
-    assert_eq!(result.edge_info.as_ref().unwrap().city.as_deref(), Some("Los Angeles"));
+    assert_eq!(
+        result.edge_info.as_ref().unwrap().colo_code.as_deref(),
+        Some("LAX")
+    );
+    assert_eq!(
+        result.edge_info.as_ref().unwrap().city.as_deref(),
+        Some("Los Angeles")
+    );
     server.stop();
 }
 
@@ -54,7 +66,11 @@ async fn phase4_1_detect_outside_cidr_but_cf_headers_low() {
         .detect(&target, Some("www.cloudflare.com"))
         .await
         .unwrap();
-    assert_eq!(result.confidence, Confidence::Low, "outside CIDR but has CF headers => LOW");
+    assert_eq!(
+        result.confidence,
+        Confidence::Low,
+        "outside CIDR but has CF headers => LOW"
+    );
     assert!(result.is_cloudflare_edge, "should still report edge");
     server.stop();
 }
@@ -105,7 +121,10 @@ async fn phase4_1_fetch_edge_info_missing_colo_returns_none() {
         .fetch_edge_info(&target, false, "example.com")
         .await
         .unwrap();
-    assert!(info.is_some(), "even unknown colo should still extract colo code");
+    assert!(
+        info.is_some(),
+        "even unknown colo should still extract colo code"
+    );
     let info = info.unwrap();
     assert_eq!(info.colo_code.as_deref(), Some("XYZ"));
     assert!(info.city.is_none(), "XYZ is not in location source");
@@ -151,7 +170,10 @@ async fn phase4_1_detect_batch_with_reset_keeps_order() {
         assert_eq!(r.target, server.target(), "target preserved for id={}", i);
     }
     let ok_count = results.iter().filter(|r| r.result.is_some()).count();
-    assert!(ok_count > 0, "at least some should succeed with 70% success prob");
+    assert!(
+        ok_count > 0,
+        "at least some should succeed with 70% success prob"
+    );
     server.stop();
 }
 
@@ -192,8 +214,7 @@ async fn phase4_1_speedtest_payload_size_calculation() {
         result.bytes_per_second
     );
     let expected_min = payload_size as u64;
-    let estimated_bytes = (result.bytes_per_second as f64)
-        * result.elapsed.as_secs_f64();
+    let estimated_bytes = (result.bytes_per_second as f64) * result.elapsed.as_secs_f64();
     assert!(
         estimated_bytes >= expected_min as f64 * 0.1,
         "estimated bytes {} from bps*elapsed should be >= 10% of payload {}, bps={}",
@@ -207,7 +228,10 @@ async fn phase4_1_speedtest_payload_size_calculation() {
 #[tokio::test]
 async fn phase4_5_cache_retry_config_defaults_sane() {
     let cfg = cfrp_detector::CacheConfig::default();
-    assert!(cfg.retry.max_attempts >= 1, "should have at least 1 attempt");
+    assert!(
+        cfg.retry.max_attempts >= 1,
+        "should have at least 1 attempt"
+    );
     assert!(cfg.retry.max_backoff_ms >= cfg.retry.initial_backoff_ms);
     assert!(cfg.retry.backoff_multiplier >= 1.0);
 }
@@ -261,9 +285,20 @@ async fn phase4_6_cancellation_returns_partial_results_in_order() {
         window: 10,
     };
     let results = detector
-        .detect_batch_with_cancel(&targets, Some("cancel.example"), 4, adaptive, cancel, |_| {})
+        .detect_batch_with_cancel(
+            &targets,
+            Some("cancel.example"),
+            4,
+            adaptive,
+            cancel,
+            |_| {},
+        )
         .await;
-    assert_eq!(results.len(), n, "even cancelled should have N results, partial error-filled");
+    assert_eq!(
+        results.len(),
+        n,
+        "even cancelled should have N results, partial error-filled"
+    );
     for (i, r) in results.iter().enumerate() {
         assert_eq!(r.id, i, "order preserved: id {} out of place", i);
     }

@@ -3,8 +3,8 @@ use crate::{
     Target,
 };
 use crate::{PinnedClientConfig, Result};
-use serde::{Deserialize, Serialize};
 use csv::Writer as CsvWriter;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -73,7 +73,10 @@ impl MasscanPipeline {
 
     pub fn build_output_filename(label: &str, tls: bool, ports: &str) -> String {
         let tls_str = if tls { "true" } else { "false" };
-        let safe_ports = ports.replace('-', "to").replace(',', "-").replace('/', "to");
+        let safe_ports = ports
+            .replace('-', "to")
+            .replace(',', "-")
+            .replace('/', "to");
         format!("{}-{}-{}.csv", label, tls_str, safe_ports)
     }
 
@@ -91,11 +94,7 @@ impl MasscanPipeline {
             .collect()
     }
 
-    async fn run_detection(
-        &self,
-        targets: &[Target],
-        _tls_hint: bool,
-    ) -> Result<Vec<BatchResult>> {
+    async fn run_detection(&self, targets: &[Target], _tls_hint: bool) -> Result<Vec<BatchResult>> {
         if targets.is_empty() {
             return Ok(Vec::new());
         }
@@ -121,7 +120,14 @@ impl MasscanPipeline {
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let results = detector
-            .detect_batch_with_cancel(&batch, self.opts.domain.as_deref(), max_conc, adaptive, cancel, |_| {})
+            .detect_batch_with_cancel(
+                &batch,
+                self.opts.domain.as_deref(),
+                max_conc,
+                adaptive,
+                cancel,
+                |_| {},
+            )
             .await;
         Ok(results)
     }
@@ -577,7 +583,8 @@ mod tests {
         };
         let speed_map = std::collections::HashMap::from([(target.to_string(), 5_000_000u64)]);
         let path = dir.path().join("mixed.csv");
-        p.write_csv_output(&path, &[err_result, ok_result], &speed_map).unwrap();
+        p.write_csv_output(&path, &[err_result, ok_result], &speed_map)
+            .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("connection refused"));
         assert!(content.contains("no cf header; no ray"));
@@ -619,7 +626,8 @@ mod tests {
             error: None,
         };
         let path = dir.path().join("edge.csv");
-        p.write_csv_output(&path, &[result], &Default::default()).unwrap();
+        p.write_csv_output(&path, &[result], &Default::default())
+            .unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("LAX"));
         assert!(content.contains("US"));

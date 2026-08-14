@@ -1396,8 +1396,9 @@ fn collect_targets_from_merged(cfg: &ConfigFile) -> Result<Vec<Target>> {
             let trimmed = data.trim();
             if let Ok(items) = serde_json::from_str::<Vec<InputTarget>>(trimmed) {
                 for x in items {
-                    let ip = IpAddr::from_str(&x.ip)
-                        .with_context(|| format!("invalid ip {} in {}", x.ip, input_path.display()))?;
+                    let ip = IpAddr::from_str(&x.ip).with_context(|| {
+                        format!("invalid ip {} in {}", x.ip, input_path.display())
+                    })?;
                     targets.push(Target::new(ip, x.port));
                 }
             } else if let Ok(items) = serde_json::from_str::<Vec<String>>(trimmed) {
@@ -1423,7 +1424,8 @@ fn collect_targets_from_merged(cfg: &ConfigFile) -> Result<Vec<Target>> {
                         continue;
                     }
                 };
-                let ip = IpAddr::from_str(&r.ip).with_context(|| format!("csv row {} invalid ip", i))?;
+                let ip =
+                    IpAddr::from_str(&r.ip).with_context(|| format!("csv row {} invalid ip", i))?;
                 let port = r.port.unwrap_or(default_port);
                 targets.push(Target::new(ip, port));
             }

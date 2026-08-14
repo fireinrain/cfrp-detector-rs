@@ -1,14 +1,14 @@
 use cfrp_detector::connector::{
-    build_rustls_client_config, ConnectorConfig, HandshakeType, PinnedConnector, Timing,
+    ConnectorConfig, HandshakeType, PinnedConnector, Timing, build_rustls_client_config,
+};
+use cfrp_detector::governor::{
+    GovernorSnapshot, MockFdCounter, ResourceGovernor, ResourceGovernorConfig, SystemFdCounter,
+    classify_resource_error,
 };
 use cfrp_detector::{
     AdaptiveConfig, BatchProgress, BatchTarget, CfLocation, CloudflareCidrs, CloudflareRanges,
     Detector, DetectorConfig, FdCounter, GovernorFeedback, LocationSource, ProbeConfig,
     SpeedTestConfig, SpeedTester, Target,
-};
-use cfrp_detector::governor::{
-    classify_resource_error, GovernorSnapshot, MockFdCounter, ResourceGovernor,
-    ResourceGovernorConfig, SystemFdCounter,
 };
 use cfrp_detector::{DetectorError, PinnedDownload};
 use std::net::{IpAddr, Ipv4Addr};
@@ -225,8 +225,7 @@ fn phase3_4_governor_records_resource_error_ratio_and_throttles() {
 
 #[test]
 fn phase3_4_classify_resource_error_known_cases() {
-    let io_emfile =
-        std::io::Error::from_raw_os_error(24);
+    let io_emfile = std::io::Error::from_raw_os_error(24);
     let e = DetectorError::Io(io_emfile);
     assert!(classify_resource_error(&e));
 
@@ -341,9 +340,15 @@ fn phase3_4_detect_batch_accepts_high_base_concurrency_with_adaptive() {
 #[test]
 fn phase3_1_connector_config_default_values_are_phase3_spec() {
     let cfg = ConnectorConfig::default();
-    assert!(cfg.accept_invalid_certs, "PinnedConnector must accept pinned-invalid certs for endpoint pinning");
+    assert!(
+        cfg.accept_invalid_certs,
+        "PinnedConnector must accept pinned-invalid certs for endpoint pinning"
+    );
     assert!(cfg.tls_session_cache, "session cache enabled by default");
-    assert_eq!(cfg.enable_0rtt, false, "0rtt disabled by default (opt-in via allow_0rtt_speedtest)");
+    assert_eq!(
+        cfg.enable_0rtt, false,
+        "0rtt disabled by default (opt-in via allow_0rtt_speedtest)"
+    );
     assert!(cfg.connect_timeout.as_millis() > 0);
     assert!(cfg.request_timeout.as_millis() > 0);
     assert!(!cfg.user_agent.is_empty());
@@ -497,7 +502,10 @@ fn phase3_4_governor_disabled_passthrough_no_throttle() {
     let mock = MockFdCounter::new(999_999, 1024); // very high fd usage (should be ignored if disabled)
     let gov = ResourceGovernor::new(cfg, mock);
     let (capped, snap) = gov.cap_concurrency(512);
-    assert_eq!(capped, 512, "disabled governor with high user_max MUST NOT cap below proposed");
+    assert_eq!(
+        capped, 512,
+        "disabled governor with high user_max MUST NOT cap below proposed"
+    );
     assert!(!snap.active);
     assert!(!snap.throttled_due_to_fd);
     assert!(!snap.throttled_due_to_resource_errors);
@@ -513,8 +521,15 @@ fn phase3_4_governor_fd_safety_headroom_reduces_budget() {
     let mock = MockFdCounter::new(100, 1024); // used=100, limit=1024 => budget = limit-used-headroom = 424
     let gov = ResourceGovernor::new(cfg, mock);
     let (capped, snap) = gov.cap_concurrency(10_000);
-    assert_eq!(gov.fd_budget(), 424, "fd_budget should be limit-used-headroom = 424");
-    assert_eq!(capped, 424, "expected capped at headroom budget 424, got {capped}");
+    assert_eq!(
+        gov.fd_budget(),
+        424,
+        "fd_budget should be limit-used-headroom = 424"
+    );
+    assert_eq!(
+        capped, 424,
+        "expected capped at headroom budget 424, got {capped}"
+    );
     assert_eq!(snap.available_fds, 1024 - 100);
     assert_eq!(snap.fd_budget, 424);
     assert_eq!(snap.proposed_concurrency, 10_000);
@@ -546,7 +561,9 @@ fn phase3_4_governor_snapshot_roundtrips_all_ratio_fields() {
     let mock = MockFdCounter::new(300, 1000);
     let gov = ResourceGovernor::new(cfg, mock);
     // window of 5/10 resource errors = 0.5 ratio
-    for ok in [true, false, true, false, false, true, true, true, false, false] {
+    for ok in [
+        true, false, true, false, false, true, true, true, false, false,
+    ] {
         gov.record_outcome(ok);
     }
     let (_, snap) = gov.cap_concurrency(128);
@@ -583,7 +600,9 @@ fn phase3_4_governor_feedback_with_snapshot_in_batch_progress() {
         last_success: true,
         last_target: Some(Target::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443)),
         throttled_due_to_fd: snap.throttled_due_to_fd,
-        governor_feedback: GovernorFeedback { snapshot: Some(snap.clone()) },
+        governor_feedback: GovernorFeedback {
+            snapshot: Some(snap.clone()),
+        },
     };
     let inner = bp.governor_feedback.snapshot.as_ref().unwrap();
     assert!(inner.active);
@@ -596,7 +615,10 @@ fn phase3_4_governor_feedback_with_snapshot_in_batch_progress() {
 fn phase3_4_classify_resource_error_network_io_variant_works() {
     let io = std::io::Error::from_raw_os_error(23); // ENFILE on macOS = too many open files in system
     let e = DetectorError::NetworkIo(io);
-    assert!(classify_resource_error(&e), "NetworkIo(ENFILE) should be classified as resource error");
+    assert!(
+        classify_resource_error(&e),
+        "NetworkIo(ENFILE) should be classified as resource error"
+    );
 
     let io2 = std::io::Error::from_raw_os_error(100); // arbitrary non-resource errno
     let e2 = DetectorError::NetworkIo(io2);
@@ -628,7 +650,10 @@ fn phase3_5_fd_counter_trait_object_is_object_safe() {
     // We don't assert exact values (OS-dependent), but both methods must be callable.
     let _open = sys.open_fd_count();
     let _lim = sys.fd_limit();
-    assert!(_lim > 0, "fd_limit should return positive for any reasonable OS");
+    assert!(
+        _lim > 0,
+        "fd_limit should return positive for any reasonable OS"
+    );
 }
 
 #[test]

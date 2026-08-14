@@ -2,21 +2,21 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use std::pin::Pin;
 
 use bytes::Bytes;
 use http_body_util::Full;
-use hyper::{Request, Response, StatusCode, body::Incoming, Method};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode, body::Incoming};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
-use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 
 use cfrp_detector::cidr::CidrSource;
 use cfrp_detector::location::{CfLocation, LocationSource};
@@ -96,8 +96,12 @@ where
 fn make_handler(
     config: MockCfServerConfig,
     req_count: Arc<Mutex<usize>>,
-) -> impl Fn(Request<Incoming>) -> Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, Infallible>> + Send>> + Clone + Send + 'static
-{
+) -> impl Fn(
+    Request<Incoming>,
+) -> Pin<Box<dyn Future<Output = Result<Response<Full<Bytes>>, Infallible>> + Send>>
++ Clone
++ Send
++ 'static {
     move |req: Request<Incoming>| {
         let config = config.clone();
         let req_count = req_count.clone();
@@ -128,7 +132,12 @@ fn make_handler(
                     let body = build_trace_body(&config);
                     build_response(status, body, &config.extra_headers, true)
                 }
-                (m, p) if p.contains("/speedtest") || (m == Method::GET.as_str() && config.speedtest_payload_bytes > 0 && p != "/") => {
+                (m, p)
+                    if p.contains("/speedtest")
+                        || (m == Method::GET.as_str()
+                            && config.speedtest_payload_bytes > 0
+                            && p != "/") =>
+                {
                     let payload = vec![0xAAu8; config.speedtest_payload_bytes];
                     build_response(status, payload, &config.extra_headers, true)
                 }

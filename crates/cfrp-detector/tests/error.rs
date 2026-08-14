@@ -46,8 +46,7 @@ fn io_into_error_is_idiomatic() {
 
 #[test]
 fn json_into_error() {
-    let res: std::result::Result<serde_json::Value, _> =
-        serde_json::from_str("{ missing: value }");
+    let res: std::result::Result<serde_json::Value, _> = serde_json::from_str("{ missing: value }");
     let json_err = res.unwrap_err();
     let e: DetectorError = json_err.into();
     assert!(format!("{e}").contains("JSON error"));

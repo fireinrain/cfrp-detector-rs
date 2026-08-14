@@ -8,8 +8,8 @@ use crate::{DetectorError, Result, RetryConfig, is_retryable_error};
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     ClientConfig, DigitallySignedStruct, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -101,7 +101,10 @@ impl ServerCertVerifier for SkipCertVerification {
     }
 }
 
-pub fn build_rustls_client_config(enable_session_resume: bool, enable_0rtt: bool) -> Arc<ClientConfig> {
+pub fn build_rustls_client_config(
+    enable_session_resume: bool,
+    enable_0rtt: bool,
+) -> Arc<ClientConfig> {
     build_rustls_client_config_sized(enable_session_resume, enable_0rtt, 2048).0
 }
 
@@ -109,7 +112,10 @@ pub fn build_rustls_client_config_sized(
     enable_session_resume: bool,
     enable_0rtt: bool,
     max_session_entries: usize,
-) -> (Arc<ClientConfig>, Option<Arc<rustls::client::ClientSessionMemoryCache>>) {
+) -> (
+    Arc<ClientConfig>,
+    Option<Arc<rustls::client::ClientSessionMemoryCache>>,
+) {
     let cache_arc = if enable_session_resume {
         Some(Arc::new(rustls::client::ClientSessionMemoryCache::new(
             max_session_entries.max(1),
@@ -216,9 +222,14 @@ pub struct PinnedConnector {
 
 impl PinnedConnector {
     pub fn new(config: PinnedClientConfig) -> Result<Self> {
-        let max_entries = config.tls_session_cache_max_entries.max(config.tls_session_cache_size).max(1);
-        let (rustls_config, cache) = build_rustls_client_config_sized(config.tls_session_cache, false, max_entries);
-        let (zero_rtt_config, _) = build_rustls_client_config_sized(config.tls_session_cache, true, max_entries);
+        let max_entries = config
+            .tls_session_cache_max_entries
+            .max(config.tls_session_cache_size)
+            .max(1);
+        let (rustls_config, cache) =
+            build_rustls_client_config_sized(config.tls_session_cache, false, max_entries);
+        let (zero_rtt_config, _) =
+            build_rustls_client_config_sized(config.tls_session_cache, true, max_entries);
         Ok(Self {
             rustls_config,
             zero_rtt_config,
@@ -323,8 +334,7 @@ impl PinnedConnector {
         let t0 = Instant::now();
         let mut stream = connect_tcp(addr, self.config.connect_timeout).await?;
         let connect_latency = t0.elapsed();
-        let req =
-            build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
+        let req = build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
         stream
             .write_all(req.as_bytes())
             .await
@@ -356,7 +366,8 @@ impl PinnedConnector {
         let retry_cfg = self.config.retry;
         with_retry(retry_cfg, || async {
             self.http_get_once(addr, host, path, extra_headers).await
-        }).await
+        })
+        .await
     }
 
     async fn https_get_once(
@@ -385,7 +396,7 @@ impl PinnedConnector {
                 return Err(DetectorError::NetworkIo(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "TLS handshake timed out",
-                )))
+                )));
             }
         };
         let tls_latency = t_tls.elapsed();
@@ -402,8 +413,7 @@ impl PinnedConnector {
             HandshakeType::FullHandshake
         };
 
-        let req =
-            build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
+        let req = build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
         tls_stream
             .write_all(req.as_bytes())
             .await
@@ -440,8 +450,10 @@ impl PinnedConnector {
         let path_owned = path.to_string();
         let extra = extra_headers.cloned();
         with_retry(retry_cfg, || async {
-            self.https_get_once(addr, &sni_owned, &host_owned, &path_owned, extra.as_ref()).await
-        }).await
+            self.https_get_once(addr, &sni_owned, &host_owned, &path_owned, extra.as_ref())
+                .await
+        })
+        .await
     }
 
     pub async fn http_download(
@@ -454,8 +466,7 @@ impl PinnedConnector {
         let t0 = Instant::now();
         let mut stream = connect_tcp(addr, self.config.connect_timeout).await?;
         let connect_latency = t0.elapsed();
-        let req =
-            build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
+        let req = build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
         stream
             .write_all(req.as_bytes())
             .await
@@ -508,7 +519,7 @@ impl PinnedConnector {
                 return Err(DetectorError::NetworkIo(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "TLS handshake timed out",
-                )))
+                )));
             }
         };
         let tls_latency = t_tls.elapsed();
@@ -525,8 +536,7 @@ impl PinnedConnector {
             HandshakeType::FullHandshake
         };
 
-        let req =
-            build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
+        let req = build_http_request("GET", host, path, &self.config.user_agent, extra_headers);
         tls_stream
             .write_all(req.as_bytes())
             .await

@@ -46,7 +46,10 @@ pub enum DetectorError {
     #[error("data source error: {0}")]
     DataSource(String),
     #[error("retries exceeded after {attempts} attempts: {source}")]
-    RetriesExceeded { source: Box<DetectorError>, attempts: usize },
+    RetriesExceeded {
+        source: Box<DetectorError>,
+        attempts: usize,
+    },
 }
 
 pub fn is_retryable_error(err: &DetectorError) -> bool {
@@ -98,7 +101,13 @@ fn matches_io_transient(e: &std::io::Error) -> bool {
     use std::io::ErrorKind::*;
     matches!(
         e.kind(),
-        TimedOut | WouldBlock | BrokenPipe | Interrupted | ConnectionRefused | ConnectionReset | AddrNotAvailable
+        TimedOut
+            | WouldBlock
+            | BrokenPipe
+            | Interrupted
+            | ConnectionRefused
+            | ConnectionReset
+            | AddrNotAvailable
     ) || {
         let raw_os = e.raw_os_error().unwrap_or(0);
         matches_os_transient(raw_os)
@@ -116,7 +125,14 @@ fn matches_os_transient(code: i32) -> bool {
     const EINTR: i32 = 4;
     matches!(
         code,
-        ETIMEDOUT | ECONNRESET | ECONNREFUSED | EADDRINUSE | EADDRNOTAVAIL | ENOTCONN | EPIPE | EINTR
+        ETIMEDOUT
+            | ECONNRESET
+            | ECONNREFUSED
+            | EADDRINUSE
+            | EADDRNOTAVAIL
+            | ENOTCONN
+            | EPIPE
+            | EINTR
     )
 }
 
