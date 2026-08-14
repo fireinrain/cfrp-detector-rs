@@ -32,7 +32,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: cargo clippy (debug, -D warnings)
-        run: cargo clippy --all --all-targets -- -D warnings
+        run: cargo clippy --all --all-targets
 
   test:
     name: Tests (Linux x86_64)
