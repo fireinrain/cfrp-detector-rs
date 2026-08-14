@@ -43,7 +43,7 @@ impl FromStr for OutputFormat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default)]
 pub struct ConfigFile {
     #[serde(default)]
     pub domain: Option<String>,
@@ -813,7 +813,41 @@ fn merge_config(cli: &Cli) -> Result<ConfigFile> {
         }
         fig = fig.admerge(Toml::file(path));
     }
-    fig = fig.admerge(Env::prefixed("CFRP_").split("_").filter(|k| k != "TARGETS"));
+    fig = fig.admerge(Env::prefixed("CFRP_").split("_").filter(|k| {
+        // 过滤掉不应解析为 ConfigFile 字段的环境变量:
+        // - TARGETS: 历史原因单独处理 (避免字符串格式冲突)
+        // - CI: GitLab/GitHub CI 常注入 *_CI=true, 与业务配置无关
+        // - DEBUG/VERBOSITY/TRACE/LOG: 纯日志相关的环境变量
+        // - CONFIG: CLI 上 --config 的环境变量来源 (循环引用)
+        matches!(
+            k.as_str(),
+            "DOMAIN"
+                | "INPUT"
+                | "OUTPUT"
+                | "FORMAT"
+                | "CONCURRENCY"
+                | "ADAPTIVE"
+                | "A_MIN"
+                | "A_MAX"
+                | "A_INITIAL"
+                | "A_WINDOW"
+                | "PROGRESS"
+                | "SPEEDTEST"
+                | "SPEEDTEST_URL_PATH"
+                | "SPEEDTEST_THREADS"
+                | "SPEEDTEST_TIMEOUT_SECS"
+                | "SPEEDTEST_CONCURRENCY"
+                | "FAST"
+                | "PROBE_TIMEOUT_SECS"
+                | "GOVERNOR_REPORT"
+                | "NO_GOVERNOR"
+                | "TLS_SESSION_CACHE"
+                | "SPEEDTEST_0RTT"
+                | "BENCH"
+                | "BENCH_QUICK"
+                | "GRACE_SECONDS"
+        )
+    }));
     let cfg: ConfigFile = fig
         .extract()
         .context("merge env + config file into ConfigFile")?;
