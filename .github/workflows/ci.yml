@@ -53,7 +53,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y masscan
-          masscan --version
+          # 1) masscan 1.3.2 上游 bug: --version 正常打印但 exit code=1, 加 || true 绕过
+          #    (见 https://github.com/robertdavidgraham/masscan 多个 issue 报告)
+          masscan --version || true
+          # 2) 验证二进制真实存在且可执行 (比 --version 更可靠的健康检查)
+          which masscan && test -x "$(which masscan)"
+          # 3) 给 masscan 授予 CAP_NET_RAW (允许非 root 发送原始 SYN 包),
+          #    否则 cargo test 以 runner 用户跑会 permission denied.
+          #    若 setcap 不可用则 fallback: chmod u+s (风险可接受, CI 临时容器)
+          if command -v setcap >/dev/null 2>&1; then
+            sudo setcap cap_net_raw+ep "$(which masscan)"
+            echo "setcap cap_net_raw+ep OK"
+          else
+            sudo chmod u+s "$(which masscan)"
+            echo "setcap unavailable, fallback to chmod u+s"
+          fi
 
       - name: Cache cargo registry & target
         uses: Swatinem/rust-cache@v2
