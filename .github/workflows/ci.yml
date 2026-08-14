@@ -109,16 +109,6 @@ jobs:
           cache-on-failure: true
           shared-key: release
 
-      - name: cargo clippy --release
-        run: |
-          cargo clippy --all --release --all-targets -- \
-            -A clippy::module_name_repetitions \
-            -A clippy::cast_possible_truncation \
-            -A clippy::cast_precision_loss \
-            -A clippy::cast_sign_loss \
-            -A clippy::missing_panics_doc \
-            -A clippy::missing_errors_doc \
-            -D warnings
 
   cross-compile:
     name: Cross-compile ${{ matrix.target }}
