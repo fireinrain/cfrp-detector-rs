@@ -66,6 +66,13 @@ pub struct MasscanPipeline {
     pub opts: PipelineOptions,
 }
 
+pub fn guess_tls_by_port(port: u16) -> bool {
+    matches!(
+        port,
+        443 | 8443 | 2053 | 2083 | 2087 | 2096 | 4443 | 8444 | 9443 | 7443
+    )
+}
+
 impl MasscanPipeline {
     pub fn new(opts: PipelineOptions) -> Self {
         Self { opts }
@@ -149,13 +156,20 @@ impl MasscanPipeline {
             threads_per_target: self.opts.speedtest_threads.max(1),
             concurrency: self.opts.speedtest_concurrency.max(1),
         };
+        let mut tls_hints: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
         let speed_targets: Vec<Target> = results
             .iter()
             .filter(|r| {
                 r.result
                     .as_ref()
-                    .map(|d| d.is_cloudflare_edge && d.is_tls)
+                    .map(|d| d.is_cloudflare_edge)
                     .unwrap_or(false)
+            })
+            .inspect(|r| {
+                if let Some(res) = r.result.as_ref() {
+                    tls_hints.insert(r.target.to_string(), res.is_tls);
+                }
             })
             .map(|r| r.target.clone())
             .collect();
@@ -178,8 +192,12 @@ impl MasscanPipeline {
                 let sni_c = domain.clone();
                 let host_c = domain.clone();
                 let path_c = self.opts.speedtest_url_path.clone();
+                let key = target.to_string();
+                let use_tls = tls_hints
+                    .get(&key)
+                    .copied()
+                    .unwrap_or_else(|| guess_tls_by_port(target.port));
                 async move {
-                    let use_tls = target.port != 80;
                     let tester =
                         SpeedTester::with_connector(conn_c, use_tls, sni_c.clone(), host_c.clone());
                     let res = tester.test(&target, &path_c, &cfg_inner).await.ok()?;
@@ -824,5 +842,49 @@ mod tests {
             MasscanPipeline::build_output_filename("X", true, "1-65535/1024,2048"),
             "X-true-1to65535to1024-2048.csv"
         );
+    }
+
+    #[test]
+    fn guess_tls_by_port_common_https_ports() {
+        assert!(guess_tls_by_port(443));
+        assert!(guess_tls_by_port(8443));
+        assert!(guess_tls_by_port(2053));
+        assert!(guess_tls_by_port(2083));
+        assert!(guess_tls_by_port(2087));
+        assert!(guess_tls_by_port(2096));
+        assert!(guess_tls_by_port(4443));
+        assert!(guess_tls_by_port(8444));
+        assert!(guess_tls_by_port(9443));
+        assert!(guess_tls_by_port(7443));
+    }
+
+    #[test]
+    fn guess_tls_by_port_common_plain_http_ports() {
+        assert!(!guess_tls_by_port(80));
+        assert!(!guess_tls_by_port(8080));
+        assert!(!guess_tls_by_port(8000));
+        assert!(!guess_tls_by_port(3000));
+        assert!(!guess_tls_by_port(8888));
+        assert!(!guess_tls_by_port(5000));
+        assert!(!guess_tls_by_port(8008));
+        assert!(!guess_tls_by_port(8081));
+        assert!(!guess_tls_by_port(4567));
+        assert!(!guess_tls_by_port(9000));
+    }
+
+    #[test]
+    fn guess_tls_by_port_arbitrary_ports_default_false() {
+        assert!(!guess_tls_by_port(22));
+        assert!(!guess_tls_by_port(53));
+        assert!(!guess_tls_by_port(808));
+        assert!(!guess_tls_by_port(1080));
+        assert!(!guess_tls_by_port(3306));
+        assert!(!guess_tls_by_port(5432));
+        assert!(!guess_tls_by_port(6379));
+        assert!(!guess_tls_by_port(27017));
+        assert!(!guess_tls_by_port(65535));
+        assert!(!guess_tls_by_port(1));
+        assert!(!guess_tls_by_port(1024));
+        assert!(!guess_tls_by_port(30000));
     }
 }

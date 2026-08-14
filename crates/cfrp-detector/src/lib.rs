@@ -36,6 +36,7 @@ pub use masscan::{
 };
 pub use masscan_pipeline::{
     MasscanPipeline, PipelineAsnTask, PipelineOptions, PipelineOutput, PipelineResult,
+    guess_tls_by_port,
 };
 pub use model::{
     BatchResult, BatchTarget, Confidence, DetectionResult, EdgeInfo, Protocol, Target, parse_target,

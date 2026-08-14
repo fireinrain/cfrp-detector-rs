@@ -7,7 +7,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "cfrp-detector"
+name = "cfrp-detector-cli"
 path = "src/main.rs"
 
 [dependencies]

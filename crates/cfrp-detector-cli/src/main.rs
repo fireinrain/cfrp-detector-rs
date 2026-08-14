@@ -4,7 +4,7 @@ use cfrp_detector::{
     MasscanConfig, MasscanPipeline, MasscanScanner, PipelineAsnTask, PipelineOptions,
     SpeedTestConfig, SpeedTester, Target,
 };
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use figment::{
     Figment,
     providers::{Env, Format, Serialized, Toml},
@@ -96,6 +96,10 @@ pub struct ConfigFile {
     pub tls_session_cache: usize,
     #[serde(default)]
     pub speedtest_0rtt: bool,
+    #[serde(default)]
+    pub speedtest_only: bool,
+    #[serde(default)]
+    pub speedtest_all: bool,
 
     #[serde(default)]
     pub bench: bool,
@@ -169,6 +173,8 @@ impl Default for ConfigFile {
             no_governor: false,
             tls_session_cache: cf_tls_session_cache(),
             speedtest_0rtt: false,
+            speedtest_only: false,
+            speedtest_all: false,
             bench: false,
             bench_quick: false,
             grace_seconds: cf_grace_seconds(),
@@ -417,6 +423,18 @@ struct Cli {
     speedtest_0rtt: bool,
 
     #[arg(
+        long = "speedtest-only",
+        help = "Skip Cloudflare edge detection entirely; run speed-test directly on every supplied TARGET"
+    )]
+    speedtest_only: bool,
+
+    #[arg(
+        long = "speedtest-all",
+        help = "After detection, run speed-test on ALL targets (default: only confirmed Cloudflare edge + TLS targets)"
+    )]
+    speedtest_all: bool,
+
+    #[arg(
         long = "interface",
         help = "Network interface used by masscan (e.g. eth0). If omitted, auto-detected or loaded from setting.txt"
     )]
@@ -475,6 +493,7 @@ struct InputTarget {
 
 #[derive(Debug, Clone, Serialize)]
 struct ExportRecord {
+    id: usize,
     target: String,
     ip: String,
     port: u16,
@@ -488,17 +507,55 @@ struct ExportRecord {
     city: Option<String>,
     latency_ms: Option<u128>,
     download_speed_bytes_per_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speedtest_elapsed_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speedtest_connect_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speedtest_tls_handshake_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speedtest_ttfb_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speedtest_handshake: Option<String>,
     confidence: String,
     confidence_reason: String,
     reasons: Vec<String>,
     error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SpeedExport {
+    bytes_per_second: Option<u64>,
+    elapsed_ms: Option<u128>,
+    connect_ms: Option<u128>,
+    tls_handshake_ms: Option<u128>,
+    ttfb_ms: Option<u128>,
+    handshake: Option<String>,
+}
+
+impl From<&cfrp_detector::SpeedTestResult> for SpeedExport {
+    fn from(sr: &cfrp_detector::SpeedTestResult) -> Self {
+        Self {
+            bytes_per_second: Some(sr.bytes_per_second),
+            elapsed_ms: Some(sr.elapsed.as_millis()),
+            connect_ms: sr.connect_latency.map(|d| d.as_millis()),
+            tls_handshake_ms: sr.tls_handshake_latency.map(|d| d.as_millis()),
+            ttfb_ms: sr.ttfb_latency.map(|d| d.as_millis()),
+            handshake: sr.handshake_type.as_ref().map(|h| format!("{:?}", h)),
+        }
+    }
+}
+
 impl ExportRecord {
-    fn build(br: &cfrp_detector::BatchResult, speed_bps: Option<u64>) -> Self {
+    fn build(br: &cfrp_detector::BatchResult, speed: Option<SpeedExport>) -> Self {
         let r = br.result.as_ref();
         let edge = r.and_then(|x| x.edge_info.as_ref());
+        let speed_bps = speed
+            .as_ref()
+            .and_then(|s| s.bytes_per_second)
+            .or_else(|| edge.and_then(|x| x.download_speed_bytes_per_sec));
         Self {
+            id: br.id,
             target: br.target.to_string(),
             ip: br.target.ip.to_string(),
             port: br.target.port,
@@ -511,8 +568,12 @@ impl ExportRecord {
             region: edge.and_then(|x| x.region.clone()),
             city: edge.and_then(|x| x.city.clone()),
             latency_ms: edge.and_then(|x| x.latency.map(|d| d.as_millis())),
-            download_speed_bytes_per_sec: speed_bps
-                .or_else(|| edge.and_then(|x| x.download_speed_bytes_per_sec)),
+            download_speed_bytes_per_sec: speed_bps,
+            speedtest_elapsed_ms: speed.as_ref().and_then(|s| s.elapsed_ms),
+            speedtest_connect_ms: speed.as_ref().and_then(|s| s.connect_ms),
+            speedtest_tls_handshake_ms: speed.as_ref().and_then(|s| s.tls_handshake_ms),
+            speedtest_ttfb_ms: speed.as_ref().and_then(|s| s.ttfb_ms),
+            speedtest_handshake: speed.as_ref().and_then(|s| s.handshake.clone()),
             confidence: r
                 .map(|x| format!("{:?}", x.confidence))
                 .unwrap_or_else(|| format!("{:?}", Confidence::None)),
@@ -534,8 +595,34 @@ impl ExportRecord {
         } else {
             format!(" reasons=[{}]", self.reasons.join("; "))
         };
+        let speed_detail = if self.download_speed_bytes_per_sec.is_some() {
+            let mut parts = Vec::new();
+            if let Some(elapsed) = self.speedtest_elapsed_ms {
+                parts.push(format!("sp_elapsed={}ms", elapsed));
+            }
+            if let Some(c) = self.speedtest_connect_ms {
+                parts.push(format!("sp_tcp={}ms", c));
+            }
+            if let Some(t) = self.speedtest_tls_handshake_ms {
+                parts.push(format!("sp_tls={}ms", t));
+            }
+            if let Some(ttfb) = self.speedtest_ttfb_ms {
+                parts.push(format!("sp_ttfb={}ms", ttfb));
+            }
+            if let Some(h) = self.speedtest_handshake.as_ref() {
+                parts.push(format!("sp_hs={}", h));
+            }
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", parts.join(" "))
+            }
+        } else {
+            String::new()
+        };
         format!(
-            "{} edge={} tls={} usable={} conf={}{}{}{}{}{}{}{}{}{}",
+            "#{:<5} {} edge={} tls={} usable={} conf={}{}{}{}{}{}{}{}{}{}{}",
+            self.id,
             self.target,
             bool_yn(self.is_cloudflare_edge),
             bool_yn(self.is_tls),
@@ -552,6 +639,7 @@ impl ExportRecord {
             self.download_speed_bytes_per_sec
                 .map(|bps| format!(" bps={}", bps))
                 .unwrap_or_default(),
+            speed_detail,
             reasons_joined,
             self.error
                 .as_ref()
@@ -843,6 +931,8 @@ fn merge_config(cli: &Cli) -> Result<ConfigFile> {
                 | "NO_GOVERNOR"
                 | "TLS_SESSION_CACHE"
                 | "SPEEDTEST_0RTT"
+                | "SPEEDTEST_ONLY"
+                | "SPEEDTEST_ALL"
                 | "BENCH"
                 | "BENCH_QUICK"
                 | "GRACE_SECONDS"
@@ -882,6 +972,8 @@ fn merge_config(cli: &Cli) -> Result<ConfigFile> {
     merged.adaptive = merged.adaptive || cli.adaptive;
     merged.fast = merged.fast || cli.fast;
     merged.speedtest = merged.speedtest || cli.speedtest;
+    merged.speedtest_only = merged.speedtest_only || cli.speedtest_only;
+    merged.speedtest_all = merged.speedtest_all || cli.speedtest_all;
     merged.progress = merged.progress || cli.progress;
     merged.governor_report = merged.governor_report || cli.governor_report;
     merged.no_governor = merged.no_governor || cli.no_governor;
@@ -1161,9 +1253,83 @@ async fn main() -> Result<()> {
 
     let targets = collect_targets_from_merged(&cfg_merged)?;
     if targets.is_empty() {
+        if std::env::args().count() == 1 {
+            Cli::command().print_help()?;
+            std::process::exit(0);
+        }
         anyhow::bail!(
             "no targets supplied; pass positional TARGET, CFRP_TARGETS env, or use -i FILE"
         );
+    }
+
+    if cfg_merged.speedtest_only {
+        let (cancel, signal_watch) = build_signals_token(cfg_merged.grace_seconds);
+        let signal_handle = tokio::spawn(signal_watch);
+
+        let pb: Option<ProgressBar> = if cfg_merged.progress {
+            let bar = ProgressBar::new(targets.len() as u64);
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta}) c={msg}",
+                )
+                .expect("progress template must be valid indicatif syntax")
+                .progress_chars("=>-"),
+            );
+            Some(bar)
+        } else {
+            None
+        };
+
+        let connect_timeout = DetectorConfig::default().probe.connect_timeout;
+        let empty_tls_hints = std::collections::HashMap::new();
+        let speed_results = run_speedtests(
+            targets.clone(),
+            &empty_tls_hints,
+            &cfg_merged,
+            connect_timeout,
+            pb.clone(),
+            cancel.clone(),
+        )
+        .await?;
+        signal_handle.abort();
+
+        if let Some(pb) = pb.as_ref() {
+            if cancel.is_cancelled() {
+                pb.finish_with_message("cancelled");
+            }
+        }
+
+        let mut records: Vec<ExportRecord> = Vec::with_capacity(targets.len());
+        for (id, t) in targets.iter().enumerate() {
+            let key = t.to_string();
+            let speed_export = speed_results.get(&key).cloned();
+            let is_tls_hint = speed_export.is_some() || cfrp_detector::guess_tls_by_port(t.port);
+            let br = cfrp_detector::BatchResult {
+                id,
+                target: t.clone(),
+                result: Some(cfrp_detector::DetectionResult {
+                    is_cloudflare_edge: false,
+                    is_tls: is_tls_hint,
+                    is_usable: speed_export.is_some(),
+                    http_status_code: None,
+                    edge_info: None,
+                    confidence: cfrp_detector::Confidence::None,
+                    confidence_reason: String::from("speedtest-only mode: edge detection skipped"),
+                    reasons: if speed_export.is_some() {
+                        vec![String::from("speedtest succeeded")]
+                    } else {
+                        vec![String::from("speedtest-only mode: edge detection skipped")]
+                    },
+                }),
+                error: if speed_export.is_none() {
+                    Some(String::from("speedtest failed or cancelled"))
+                } else {
+                    None
+                },
+            };
+            records.push(ExportRecord::build(&br, speed_export));
+        }
+        return emit_records(&cfg_merged, &records);
     }
 
     if cfg_merged.fast {
@@ -1183,7 +1349,31 @@ async fn main() -> Result<()> {
             result: Some(result),
             error: None,
         };
-        let records = vec![ExportRecord::build(&br, None)];
+        let speed_export = if cfg_merged.speedtest {
+            let (cancel, _) = build_signals_token(cfg_merged.grace_seconds);
+            let connect_timeout = DetectorConfig::default().probe.connect_timeout;
+            let mut tls_hints = std::collections::HashMap::new();
+            tls_hints.insert(
+                t.to_string(),
+                br.result
+                    .as_ref()
+                    .map(|r| r.is_tls)
+                    .unwrap_or(cfrp_detector::guess_tls_by_port(t.port)),
+            );
+            let mut map = run_speedtests(
+                vec![t.clone()],
+                &tls_hints,
+                &cfg_merged,
+                connect_timeout,
+                None,
+                cancel,
+            )
+            .await?;
+            map.remove(&t.to_string())
+        } else {
+            None
+        };
+        let records = vec![ExportRecord::build(&br, speed_export)];
         return emit_records(&cfg_merged, &records);
     }
 
@@ -1283,102 +1473,40 @@ async fn main() -> Result<()> {
         pb.finish_with_message(format!("{status_tag} {done_count}/{total}"));
     }
 
-    let speed_cancel = cancel.clone();
-    let speed_bps_per_target: std::collections::HashMap<String, u64> = if cfg_merged.speedtest
-        && !speed_cancel.is_cancelled()
-    {
-        if let Some(bar) = pb.as_ref() {
-            bar.reset();
-            bar.set_length(results.len() as u64);
-            bar.set_message("speedtest");
-        }
-        let speed_cfg = SpeedTestConfig {
-            timeout: Duration::from_secs(cfg_merged.speedtest_timeout_secs),
-            threads_per_target: cfg_merged.speedtest_threads.max(1),
-            concurrency: cfg_merged.speedtest_concurrency.max(1),
+    let speed_results: std::collections::HashMap<String, SpeedExport> =
+        if cfg_merged.speedtest && !cancel.is_cancelled() {
+            let mut tls_hints = std::collections::HashMap::new();
+            let speed_targets: Vec<Target> = results
+                .iter()
+                .filter(|r| {
+                    if cfg_merged.speedtest_all {
+                        r.result.is_some() && r.error.is_none()
+                    } else {
+                        r.result
+                            .as_ref()
+                            .map(|d| d.is_cloudflare_edge && d.is_tls)
+                            .unwrap_or(false)
+                    }
+                })
+                .inspect(|r| {
+                    if let Some(res) = r.result.as_ref() {
+                        tls_hints.insert(r.target.to_string(), res.is_tls);
+                    }
+                })
+                .map(|r| r.target.clone())
+                .collect();
+            run_speedtests(
+                speed_targets,
+                &tls_hints,
+                &cfg_merged,
+                connect_timeout,
+                pb.clone(),
+                cancel.clone(),
+            )
+            .await?
+        } else {
+            std::collections::HashMap::new()
         };
-        let domain = cfg_merged
-            .domain
-            .clone()
-            .unwrap_or_else(|| "www.cloudflare.com".to_string());
-        let host = domain.as_str();
-        let speed_targets: Vec<Target> = results
-            .iter()
-            .filter(|r| {
-                r.result
-                    .as_ref()
-                    .map(|d| d.is_cloudflare_edge && d.is_tls)
-                    .unwrap_or(false)
-            })
-            .map(|r| r.target.clone())
-            .collect();
-        let mut map = std::collections::HashMap::new();
-        use futures::{StreamExt, stream};
-        let host_owned = host.to_string();
-        let session_cache = cfg_merged.tls_session_cache.max(128);
-        let enable_0rtt = cfg_merged.speedtest_0rtt;
-        let mut conn_cfg = cfrp_detector::ConnectorConfig::default();
-        conn_cfg.connect_timeout = connect_timeout;
-        conn_cfg.request_timeout = speed_cfg.timeout;
-        conn_cfg.tls_session_cache_max_entries = session_cache;
-        conn_cfg.tls_session_cache_size = session_cache;
-        conn_cfg.enable_0rtt = enable_0rtt;
-        let conn = Arc::new(
-            cfrp_detector::PinnedConnector::new(conn_cfg)
-                .context("build pinned connector for speedtest")?,
-        );
-        let stream = stream::iter(speed_targets.into_iter().enumerate())
-            .map(|(i, target)| {
-                let cfg_inner = speed_cfg.clone();
-                let pb_opt = pb.clone();
-                let conn_c = conn.clone();
-                let sni_c = host_owned.clone();
-                let path_c = cfg_merged.speedtest_url_path.clone();
-                let sc = speed_cancel.clone();
-                async move {
-                    if sc.is_cancelled() {
-                        return None;
-                    }
-                    let use_tls = target.port != 80;
-                    let tester =
-                        SpeedTester::with_connector(conn_c, use_tls, sni_c.clone(), sni_c.clone());
-                    if enable_0rtt {
-                        tester.set_0rtt_enabled(true);
-                    }
-                    let res = tester
-                        .test_with_warmup(&target, &path_c, &cfg_inner)
-                        .await
-                        .ok();
-                    if let Some(pb) = pb_opt {
-                        pb.inc(1);
-                    }
-                    res.map(|r| (target, r.bytes_per_second)).or_else(|| {
-                        let _ = i;
-                        None
-                    })
-                }
-            })
-            .buffer_unordered(speed_cfg.concurrency.max(1));
-        let outcomes: Vec<_> = stream.collect().await;
-        let total_targets = outcomes.len();
-        for (t, bps) in outcomes.into_iter().flatten() {
-            map.insert(t.to_string(), bps);
-        }
-        if let Some(bar) = pb.as_ref() {
-            bar.finish_with_message("speedtest done");
-        }
-        if cfg_merged.governor_report {
-            eprintln!(
-                "[speedtest] session_cache_len={} 0rtt_enabled={} targets_tested={}",
-                conn.tls_session_cache_len(),
-                enable_0rtt,
-                total_targets
-            );
-        }
-        map
-    } else {
-        std::collections::HashMap::new()
-    };
 
     if cfg_merged.governor_report {
         if let Some(gov) = detector.governor() {
@@ -1404,8 +1532,8 @@ async fn main() -> Result<()> {
 
     let mut records: Vec<ExportRecord> = Vec::with_capacity(results.len());
     for br in &results {
-        let bps = speed_bps_per_target.get(&br.target.to_string()).copied();
-        records.push(ExportRecord::build(br, bps));
+        let speed_export = speed_results.get(&br.target.to_string()).cloned();
+        records.push(ExportRecord::build(br, speed_export));
     }
 
     emit_records(&cfg_merged, &records)
@@ -1417,6 +1545,17 @@ fn collect_targets_from_merged(cfg: &ConfigFile) -> Result<Vec<Target>> {
     for raw in &cfg.targets {
         if let Some(t) = parse_target(raw, default_port)? {
             targets.push(t);
+        }
+    }
+    if let Ok(env_val) = std::env::var("CFRP_TARGETS") {
+        for part in env_val.split(|c: char| c == ',' || c.is_whitespace()) {
+            let s = part.trim();
+            if s.is_empty() {
+                continue;
+            }
+            if let Some(t) = parse_target(s, default_port)? {
+                targets.push(t);
+            }
         }
     }
     if let Some(input_path) = cfg.input.as_ref() {
@@ -1492,6 +1631,114 @@ fn infer_format(cfg: &ConfigFile) -> OutputFormat {
     OutputFormat::Json
 }
 
+fn build_speedtest_config(
+    cfg_merged: &ConfigFile,
+    connect_timeout: Duration,
+) -> Result<(
+    SpeedTestConfig,
+    Arc<cfrp_detector::PinnedConnector>,
+    String,
+    String,
+)> {
+    let speed_cfg = SpeedTestConfig {
+        timeout: Duration::from_secs(cfg_merged.speedtest_timeout_secs),
+        threads_per_target: cfg_merged.speedtest_threads.max(1),
+        concurrency: cfg_merged.speedtest_concurrency.max(1),
+    };
+    let domain = cfg_merged
+        .domain
+        .clone()
+        .unwrap_or_else(|| "www.cloudflare.com".to_string());
+    let session_cache = cfg_merged.tls_session_cache.max(128);
+    let enable_0rtt = cfg_merged.speedtest_0rtt;
+    let mut conn_cfg = cfrp_detector::ConnectorConfig::default();
+    conn_cfg.connect_timeout = connect_timeout;
+    conn_cfg.request_timeout = speed_cfg.timeout;
+    conn_cfg.tls_session_cache_max_entries = session_cache;
+    conn_cfg.tls_session_cache_size = session_cache;
+    conn_cfg.enable_0rtt = enable_0rtt;
+    let conn = Arc::new(
+        cfrp_detector::PinnedConnector::new(conn_cfg)
+            .context("build pinned connector for speedtest")?,
+    );
+    Ok((
+        speed_cfg,
+        conn,
+        domain,
+        cfg_merged.speedtest_url_path.clone(),
+    ))
+}
+
+async fn run_speedtests(
+    targets: Vec<Target>,
+    tls_hints: &std::collections::HashMap<String, bool>,
+    cfg_merged: &ConfigFile,
+    connect_timeout: Duration,
+    pb: Option<ProgressBar>,
+    cancel: CancellationToken,
+) -> Result<std::collections::HashMap<String, SpeedExport>> {
+    if targets.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    if let Some(bar) = pb.as_ref() {
+        bar.reset();
+        bar.set_length(targets.len() as u64);
+        bar.set_message("speedtest");
+    }
+    let (speed_cfg, conn, sni, path) = build_speedtest_config(cfg_merged, connect_timeout)?;
+    let enable_0rtt = cfg_merged.speedtest_0rtt;
+    let session_cache_len_for_report = conn.tls_session_cache_len();
+    use futures::{StreamExt, stream};
+    let stream = stream::iter(targets.into_iter())
+        .map(|target| {
+            let cfg_inner = speed_cfg.clone();
+            let pb_opt = pb.clone();
+            let conn_c = conn.clone();
+            let sni_c = sni.clone();
+            let path_c = path.clone();
+            let sc = cancel.clone();
+            let use_tls = tls_hints
+                .get(&target.to_string())
+                .copied()
+                .unwrap_or_else(|| cfrp_detector::guess_tls_by_port(target.port));
+            async move {
+                if sc.is_cancelled() {
+                    return None;
+                }
+                let tester =
+                    SpeedTester::with_connector(conn_c, use_tls, sni_c.clone(), sni_c.clone());
+                if enable_0rtt {
+                    tester.set_0rtt_enabled(true);
+                }
+                let res = tester
+                    .test_with_warmup(&target, &path_c, &cfg_inner)
+                    .await
+                    .ok();
+                if let Some(pb) = pb_opt {
+                    pb.inc(1);
+                }
+                res.map(|r| (target, SpeedExport::from(&r)))
+            }
+        })
+        .buffer_unordered(speed_cfg.concurrency.max(1));
+    let outcomes: Vec<_> = stream.collect().await;
+    let total_targets = outcomes.len();
+    let mut map = std::collections::HashMap::new();
+    for (t, se) in outcomes.into_iter().flatten() {
+        map.insert(t.to_string(), se);
+    }
+    if let Some(bar) = pb.as_ref() {
+        bar.finish_with_message("speedtest done");
+    }
+    if cfg_merged.governor_report {
+        eprintln!(
+            "[speedtest] session_cache_len={} 0rtt_enabled={} targets_tested={}",
+            session_cache_len_for_report, enable_0rtt, total_targets
+        );
+    }
+    Ok(map)
+}
+
 fn emit_records(cfg: &ConfigFile, records: &[ExportRecord]) -> Result<()> {
     let fmt = infer_format(cfg);
     let mut sink: Box<dyn Write> = if let Some(path) = cfg.output.as_ref() {
@@ -1526,6 +1773,7 @@ fn emit_records(cfg: &ConfigFile, records: &[ExportRecord]) -> Result<()> {
 
 #[derive(Debug, Serialize)]
 struct CsvRow<'a> {
+    id: usize,
     target: &'a str,
     ip: &'a str,
     port: u16,
@@ -1539,6 +1787,11 @@ struct CsvRow<'a> {
     city: &'a str,
     latency_ms: Option<u128>,
     download_speed_bytes_per_sec: Option<u64>,
+    speedtest_elapsed_ms: Option<u128>,
+    speedtest_connect_ms: Option<u128>,
+    speedtest_tls_handshake_ms: Option<u128>,
+    speedtest_ttfb_ms: Option<u128>,
+    speedtest_handshake: &'a str,
     confidence: &'a str,
     confidence_reason: &'a str,
     reasons: String,
@@ -1554,6 +1807,7 @@ struct CsvInputRow {
 impl<'a> From<&'a ExportRecord> for CsvRow<'a> {
     fn from(r: &'a ExportRecord) -> Self {
         Self {
+            id: r.id,
             target: &r.target,
             ip: &r.ip,
             port: r.port,
@@ -1567,6 +1821,11 @@ impl<'a> From<&'a ExportRecord> for CsvRow<'a> {
             city: r.city.as_deref().unwrap_or(""),
             latency_ms: r.latency_ms,
             download_speed_bytes_per_sec: r.download_speed_bytes_per_sec,
+            speedtest_elapsed_ms: r.speedtest_elapsed_ms,
+            speedtest_connect_ms: r.speedtest_connect_ms,
+            speedtest_tls_handshake_ms: r.speedtest_tls_handshake_ms,
+            speedtest_ttfb_ms: r.speedtest_ttfb_ms,
+            speedtest_handshake: r.speedtest_handshake.as_deref().unwrap_or(""),
             confidence: &r.confidence,
             confidence_reason: &r.confidence_reason,
             reasons: r.reasons.join("; "),
