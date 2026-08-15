@@ -1,19 +1,25 @@
 [package]
 name = "cfrp-detector-cli"
-version = "0.1.0"
-description = "Command line interface for cfrp-detector"
+version.workspace = true
+description = "Command line interface for Cloudflare edge detection and network quality probing"
+readme = "../../README.md"
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["cloudflare", "network", "cli", "detector", "speedtest"]
+categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
-name = "cfrp-detector-cli"
+name = "cfrp-detector"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-cfrp-detector = { path = "../cfrp-detector" }
+cfrp-detector.workspace = true
 csv.workspace = true
 figment.workspace = true
 futures.workspace = true

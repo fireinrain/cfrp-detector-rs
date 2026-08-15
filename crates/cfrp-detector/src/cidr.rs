@@ -1,3 +1,11 @@
+//! Official Cloudflare CIDR range loading and IP-membership checks.
+//!
+//! [`CloudflareRanges`] fetches the plain-text lists from
+//! `https://www.cloudflare.com/ips-v4` and `ips-v6`, caches them locally for
+//! a week, and compiles them into a compact in-memory representation that
+//! supports fast O(n) membership tests (n is typically ~50 ranges, so this
+//! is plenty fast — no trie needed).
+
 use crate::{FileCache, Result};
 use parking_lot::RwLock;
 use std::{net::IpAddr, sync::Arc, time::Duration};
@@ -5,18 +13,28 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 const IPV4_URL: &str = "https://www.cloudflare.com/ips-v4";
 const IPV6_URL: &str = "https://www.cloudflare.com/ips-v6";
 
+/// Pluggable CIDR-membership source. Useful for mocking in tests.
 pub trait CidrSource: Send + Sync {
+    /// Returns `true` if `ip` falls within any of the configured ranges.
     fn contains(&self, ip: IpAddr) -> bool;
 }
 
+/// Raw (serialised) Cloudflare CIDR payload: stringified IPv4/IPv6 networks
+/// plus metadata about when it was downloaded.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CloudflareCidrs {
+    /// Unix timestamp (seconds) of the fetch, if known.
     pub fetched_at: Option<u64>,
+    /// Human-readable provenance string (URL or file path).
     pub source: String,
+    /// CIDR string list, e.g. `["104.16.0.0/12", …]`.
     pub ipv4: Vec<String>,
+    /// CIDR string list, e.g. `["2606:4700::/32", …]`.
     pub ipv6: Vec<String>,
 }
 
+/// Parsed, in-memory Cloudflare CIDR set. Use [`CidrSource::contains`] via the
+/// trait to query IP membership.
 #[derive(Debug, Clone)]
 pub struct CloudflareRanges {
     v4: Arc<RwLock<Vec<netip::IpNetLike>>>,
@@ -69,6 +87,7 @@ mod netip {
 }
 
 impl CloudflareRanges {
+    /// Creates a ranges object with zero networks loaded (useful for tests).
     pub fn empty() -> Self {
         Self {
             v4: Arc::new(RwLock::new(Vec::new())),
@@ -76,6 +95,8 @@ impl CloudflareRanges {
         }
     }
 
+    /// Builds the parsed range set from a serialised [`CloudflareCidrs`] value.
+    /// Malformed CIDR entries are silently dropped.
     pub fn from_cidrs(cidrs: CloudflareCidrs) -> Self {
         let mut v4 = Vec::new();
         let mut v6 = Vec::new();
@@ -95,6 +116,9 @@ impl CloudflareRanges {
         }
     }
 
+    /// Fetches the official IPv4 + IPv6 lists from Cloudflare (cached for one
+    /// week by the provided [`FileCache`]) and returns a populated
+    /// [`CloudflareRanges`] instance.
     pub async fn load(client: &reqwest::Client, cache: &FileCache) -> Result<Self> {
         let (v4, v6) = tokio::try_join!(
             Self::load_one(client, cache, "ips-v4", IPV4_URL),

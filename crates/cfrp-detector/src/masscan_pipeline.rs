@@ -1,3 +1,11 @@
+//! Full end-to-end pipeline: masscan port scan → Cloudflare edge detection →
+//! optional speed test → JSON/CSV report on disk.
+//!
+//! The [`MasscanPipeline`] type here wires together [`MasscanScanner`] from the
+//! sibling module, a [`Detector`], and an optional [`SpeedTester`]. Use it when
+//! you want to scan whole ASNs at a time and persist structured results instead
+//! of manually composing the individual stages.
+
 use crate::{
     BatchResult, BatchTarget, Detector, DetectorConfig, OpenPort, SpeedTestConfig, SpeedTester,
     Target,
@@ -11,25 +19,41 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Configuration for a single [`MasscanPipeline`] invocation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PipelineOptions {
+    /// Optional domain override used during the TLS/HTTP probes (SNI + Host header).
     pub domain: Option<String>,
+    /// Max number of simultaneous detect calls after the masscan phase completes.
     pub concurrency: usize,
+    /// Whether to also run a throughput speed test on each confirmed CF edge IP.
     pub speedtest: bool,
+    /// Multi-part download threads per individual speed test.
     pub speedtest_threads: usize,
+    /// URL path (relative to the target's root) used as the speed test payload.
     pub speedtest_url_path: String,
+    /// Max simultaneous speed tests running across the whole pipeline.
     pub speedtest_concurrency: usize,
+    /// Directory where per-run JSON + CSV artefacts will be created.
     pub output_dir: PathBuf,
+    /// Minimum concurrency floor for the adaptive governor.
     pub adaptive_min: usize,
+    /// Maximum concurrency ceiling for the adaptive governor.
     pub adaptive_max: usize,
+    /// Per-request probe timeout used when building the internal [`Detector`].
     pub probe_timeout_secs: u64,
+    /// TLS session cache size (0 disables). Improves repeat probes dramatically.
     pub tls_session_cache: usize,
 }
 
+/// One ASN-level entry in the pipeline's input worklist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineAsnTask {
+    /// AS number whose prefixes will be scanned and detected.
     pub asn: u32,
+    /// Masscan-style port string (e.g. `443,2053,8443`).
     pub ports: String,
+    /// Whether the downstream detection should expect/require TLS.
     pub tls: bool,
 }
 
@@ -43,29 +67,46 @@ impl From<crate::AsnTask> for PipelineAsnTask {
     }
 }
 
+/// Summary statistics written for one individual `(ASN, ports)` pipeline task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineOutput {
+    /// Human-readable task label, usually `AS13335` or an IP range digest.
     pub label: String,
+    /// `true` if the task ran under the TLS-enabled pipeline branch.
     pub tls_flag: bool,
+    /// Port-string that was scanned (echoed from the input task).
     pub ports: String,
+    /// Filesystem path to the CSV detail file for this task.
     pub output_path: PathBuf,
+    /// Masscan SYN-scan wall time, in whole seconds.
     pub masscan_duration_secs: u64,
+    /// Detection phase wall time, in whole seconds.
     pub detection_duration_secs: u64,
+    /// Unique open `(IP, port)` pairs returned from masscan.
     pub open_ports_count: usize,
+    /// Number of detection calls that ran to completion.
     pub detection_results_count: usize,
+    /// Number of targets classified as a Cloudflare edge POP.
     pub cloudflare_edges_count: usize,
 }
 
+/// Aggregate report returned from a full [`MasscanPipeline::run`] call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineResult {
+    /// Per-task summaries, one entry per input [`PipelineAsnTask`].
     pub outputs: Vec<PipelineOutput>,
+    /// End-to-end wall time for the entire pipeline run, in whole seconds.
     pub total_duration_secs: u64,
 }
 
+/// Top-level orchestrator: masscan → detect → speedtest → CSV/JSON report.
 pub struct MasscanPipeline {
+    /// Immutable configuration for this pipeline instance.
     pub opts: PipelineOptions,
 }
 
+/// Convenience heuristic: returns `true` for ports that are almost always
+/// TLS-terminated on Cloudflare's anycast edge.
 pub fn guess_tls_by_port(port: u16) -> bool {
     matches!(
         port,
@@ -74,10 +115,12 @@ pub fn guess_tls_by_port(port: u16) -> bool {
 }
 
 impl MasscanPipeline {
+    /// Creates a new pipeline from the supplied options.
     pub fn new(opts: PipelineOptions) -> Self {
         Self { opts }
     }
 
+    /// Builds a sanitised filename (ASN-tls-ports.csv) safe for most filesystems.
     pub fn build_output_filename(label: &str, tls: bool, ports: &str) -> String {
         let tls_str = if tls { "true" } else { "false" };
         let safe_ports = ports

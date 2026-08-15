@@ -1,3 +1,10 @@
+//! Cloudflare colo (edge POP) code → geographic location lookup.
+//!
+//! The [`LocationStore`] loads a community-maintained JSON map of IATA-style
+//! three-letter Cloudflare POP codes (`LAX`, `NRT`, `SIN`, `HKG`, …) to
+//! human-readable city / region / country names and coordinates, caching the
+//! file locally for three days at a time.
+
 use crate::{FileCache, Result};
 use parking_lot::RwLock;
 use serde::Deserialize;
@@ -6,32 +13,45 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 const LOCATIONS_URL: &str =
     "https://raw.githubusercontent.com/Netrvin/cloudflare-colo-list/main/locations.json";
 
+/// A single Cloudflare colo entry: geographic details keyed by its 3-letter code.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct CfLocation {
+    /// Three-letter IATA-style colo code (e.g. `LAX`).
     pub iata: String,
+    /// Approximate latitude in decimal degrees.
     pub lat: f64,
+    /// Approximate longitude in decimal degrees.
     pub lon: f64,
+    /// Human-readable city name (English).
     pub city: String,
+    /// Region / state / province name if known.
     pub region: String,
+    /// ISO 3166-1 alpha-2 two-letter country code.
     pub cca2: String,
 }
 
+/// Pluggable colo lookup trait. Swap in a mock implementation for tests.
 pub trait LocationSource: Send + Sync {
+    /// Looks up the given colo code (case-insensitive).
     fn lookup(&self, colo: &str) -> Option<CfLocation>;
 }
 
+/// Default [`LocationSource`] backed by an in-memory `HashMap` loaded from the
+/// community-maintained colo JSON file.
 #[derive(Debug, Clone)]
 pub struct LocationStore {
     map: Arc<RwLock<HashMap<String, CfLocation>>>,
 }
 
 impl LocationStore {
+    /// Creates an empty store (useful for tests / offline fallbacks).
     pub fn empty() -> Self {
         Self {
             map: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    /// Builds a store directly from an iterator of [`CfLocation`] entries.
     pub fn from_locations(locations: impl IntoIterator<Item = CfLocation>) -> Self {
         let map = locations
             .into_iter()
@@ -42,6 +62,7 @@ impl LocationStore {
         }
     }
 
+    /// Fetches and caches the authoritative colo JSON, building a new store.
     pub async fn load(client: &reqwest::Client, cache: &FileCache) -> Result<Self> {
         let bytes = cache
             .load_or_fetch(

@@ -1,3 +1,11 @@
+//! Low-level TLS and HTTP probe primitives used by the [`Detector`](crate::Detector).
+//!
+//! The [`ProbeEngine`] wraps a [`PinnedConnector`] and provides two stages:
+//! 1. [`TlsProbe`] — attempts a TLS handshake with candidate SNI values,
+//!    checking for Cloudflare-specific certificate fingerprints.
+//! 2. [`HttpProbe`] — issues an HTTP(S) GET for `/cdn-cgi/trace` and scores
+//!    Cloudflare-specific response headers (`CF-Ray`, `Server: cloudflare`, …).
+
 use crate::{
     Result,
     connector::{HandshakeType, PinnedConnector, PinnedHttpResponse},
@@ -8,15 +16,24 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Knobs for individual TLS/HTTP probes: timeouts, SNI defaults, TLS session cache.
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
+    /// Socket connect deadline.
     pub connect_timeout: Duration,
+    /// Per-HTTP-request deadline (from send to headers + body received).
     pub request_timeout: Duration,
+    /// User-Agent string sent with every probe request.
     pub user_agent: String,
+    /// SNI + `Host` header used when the caller does not supply a domain override.
     pub default_sni: String,
+    /// Toggle for the client-side TLS session cache (speeds up repeat probes).
     pub tls_session_cache: bool,
+    /// Maximum number of entries in the TLS session cache.
     pub tls_session_cache_size: usize,
+    /// When `true`, advertise and accept TLS 0-RTT Early Data for speed test connections.
     pub allow_0rtt_speedtest: bool,
+    /// When `true`, skip TLS certificate validation (required because we probe raw IPs).
     pub accept_invalid_certs: bool,
 }
 
@@ -36,6 +53,7 @@ impl Default for ProbeConfig {
 }
 
 impl ProbeConfig {
+    /// Builds a standard [`reqwest::Client`] (used for data-source fetches, not the actual edge probes).
     pub fn build_client(
         &self,
         resolve: Option<(&str, SocketAddr)>,
@@ -54,6 +72,7 @@ impl ProbeConfig {
         builder.build()
     }
 
+    /// Converts this probe config into the equivalent [`PinnedClientConfig`](crate::connector::PinnedClientConfig).
     pub fn to_pinned(&self) -> crate::connector::PinnedClientConfig {
         crate::connector::PinnedClientConfig {
             connect_timeout: self.connect_timeout,
@@ -68,37 +87,52 @@ impl ProbeConfig {
         }
     }
 
+    /// Shortcut that builds and wraps a fresh [`PinnedConnector`].
     pub fn build_pinned_connector(&self) -> Result<Arc<PinnedConnector>> {
         let pc = PinnedConnector::new(self.to_pinned())?;
         Ok(Arc::new(pc))
     }
 }
 
+/// Output of a successful TLS-layer probe attempt.
 #[derive(Debug, Clone)]
 pub struct TlsProbe {
+    /// SNI value that successfully completed the handshake.
     pub working_sni: String,
+    /// `true` if the server certificate / cipher suite matches Cloudflare fingerprints.
     pub cloudflare_trait: bool,
+    /// Reserved: optional free-form reason text describing the match.
     #[allow(dead_code)]
     pub reason: Option<String>,
+    /// Negotiated handshake variant (full / resumption / 0-RTT).
     pub handshake_type: HandshakeType,
+    /// TCP connect latency observed during the probe.
     pub connect_latency: Option<Duration>,
+    /// TLS handshake latency (from ClientHello to Finished).
     pub tls_handshake_latency: Option<Duration>,
+    /// Time-to-first-byte after issuing the HTTP request on the established TLS stream.
     pub ttfb_latency: Option<Duration>,
 }
 
+/// Output of an HTTP(S) `/cdn-cgi/trace` probe.
 #[derive(Debug, Clone)]
 pub struct HttpProbe {
+    /// Response status code; `None` if no HTTP response was received at all.
     pub status: Option<StatusCode>,
+    /// `true` if any Cloudflare-specific response header / body pattern matched.
     pub cloudflare_trait: bool,
+    /// Human-readable list of each individual Cloudflare feature that matched.
     pub reasons: Vec<String>,
 }
 
+/// Owns the pinned connector and exposes the two-stage probe pipeline.
 pub struct ProbeEngine {
     cfg: ProbeConfig,
     connector: Arc<PinnedConnector>,
 }
 
 impl ProbeEngine {
+    /// Creates a new engine from the supplied config, constructing an internal pinned connector.
     pub fn new(cfg: ProbeConfig) -> Self {
         let connector = cfg.build_pinned_connector().unwrap_or_else(|_| {
             Arc::new(
@@ -108,10 +142,14 @@ impl ProbeEngine {
         Self { cfg, connector }
     }
 
+    /// Returns a reference to the underlying pinned connector (share with a [`SpeedTester`]).
     pub fn connector(&self) -> &Arc<PinnedConnector> {
         &self.connector
     }
 
+    /// Runs the TLS handshake probe against `target`, trying a small set of
+    /// candidate SNI values (`domain` override if provided, otherwise the
+    /// configured default). Returns `Ok(None)` if the port speaks no TLS at all.
     pub async fn tls_probe(
         &self,
         target: &Target,

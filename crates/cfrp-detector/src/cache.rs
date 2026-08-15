@@ -1,3 +1,10 @@
+//! Local day-rollover file cache for external data sources (CIDR ranges, colo JSON, ASN HTML).
+//!
+//! The `FileCache` stores fetched resources as `<prefix>-day-<NNN><extension>` inside
+//! a configurable directory, rolling over to a fresh file every calendar day (UTC).
+//! A fetch-with-retry loop handles transient network errors and HTTP 429 rate limits
+//! using exponential backoff + jitter.
+
 use crate::{DetectorError, Result, RetryConfig, is_retryable_error};
 use std::{
     path::{Path, PathBuf},
@@ -5,11 +12,16 @@ use std::{
 };
 use tokio::{fs, io::AsyncWriteExt, time::sleep};
 
+/// Configuration for the on-disk HTTP response cache.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
+    /// Directory where cached files are stored (created on demand).
     pub directory: PathBuf,
+    /// Files older than this are considered stale and refetched.
     pub max_age: Duration,
+    /// Retry policy used for network fetches.
     pub retry: RetryConfig,
+    /// Whether to treat HTTP 429 (Too Many Requests) as a retryable response.
     pub retry_on_429: bool,
 }
 
@@ -29,16 +41,24 @@ impl Default for CacheConfig {
     }
 }
 
+/// Simple day-rolling file cache that sits in front of data-source fetches.
 #[derive(Debug, Clone)]
 pub struct FileCache {
+    /// Active configuration (public for inspection / overrides).
     pub cfg: CacheConfig,
 }
 
 impl FileCache {
+    /// Wraps a [`CacheConfig`] into a new cache instance.
     pub fn new(cfg: CacheConfig) -> Self {
         Self { cfg }
     }
 
+    /// Returns cached bytes if a fresh file exists, otherwise fetches `url`,
+    /// stores the result under the day-stamped filename, and returns the bytes.
+    ///
+    /// Stale files (older than `max_age`) for the same `prefix`/`extension`
+    /// pair are automatically cleaned up after a successful fetch.
     pub async fn load_or_fetch(
         &self,
         prefix: &str,

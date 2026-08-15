@@ -1,3 +1,11 @@
+//! Core data models for detection results, targets, and confidence levels.
+//!
+//! This module defines the primary data structures used throughout the library:
+//! - [`Target`]: A probe endpoint (IP + port)
+//! - [`Confidence`]: Detection confidence levels
+//! - [`DetectionResult`]: The output of a single edge detection probe
+//! - [`BatchResult`]: Wraps a result with its target for batch operations
+
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -6,18 +14,50 @@ use std::{
     time::Duration,
 };
 
+/// A probe target consisting of an IP address and port.
+///
+/// `Target` is the fundamental input unit for all detection and speed test operations.
+/// It supports both IPv4 and IPv6 addresses, and implements [`Display`](fmt::Display)
+/// with proper IPv6 bracket notation (e.g., `[::1]:443`).
+///
+/// # Examples
+///
+/// ```
+/// use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+/// use cfrp_detector::Target;
+///
+/// let v4 = Target::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
+/// assert_eq!(v4.to_string(), "1.1.1.1:443");
+///
+/// let v6 = Target::new(IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111)), 443);
+/// assert_eq!(v6.to_string(), "[2606:4700::1111]:443");
+/// ```
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Target {
+    /// IP address (IPv4 or IPv6) of the target endpoint.
     pub ip: IpAddr,
+    /// TCP port number to probe.
     pub port: u16,
 }
 
 impl Target {
+    /// Creates a new [`Target`] from the given IP address and port.
     pub fn new(ip: IpAddr, port: u16) -> Self {
         Self { ip, port }
     }
 }
 
+/// Parses a target string into a [`Target`] with a fallback default port.
+///
+/// Supported formats:
+/// - `ip:port` (IPv4) e.g. `1.1.1.1:443`
+/// - `ip` (uses default port) e.g. `1.1.1.1`
+/// - `[ipv6]:port` (IPv6 with brackets) e.g. `[2606:4700::1111]:443`
+/// - `[ipv6]` (IPv6 in brackets, uses default port) e.g. `[2606:4700::1111]`
+///
+/// # Errors
+///
+/// Returns an error string if the input cannot be parsed as any supported format.
 pub fn parse_target(s: &str, default_port: u16) -> Result<Target, String> {
     if let Ok(addr) = SocketAddr::from_str(s) {
         return Ok(Target::new(addr.ip(), addr.port()));
@@ -59,30 +99,53 @@ impl fmt::Display for Target {
     }
 }
 
+/// A [`Target`] wrapped with an optional numeric identifier for batch operations.
+///
+/// The `id` field is useful for correlating batch results back to their original
+/// position in an input list or external dataset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchTarget {
+    /// The probe target.
     pub target: Target,
+    /// Optional caller-provided identifier. Defaults to `0`.
     #[serde(default)]
     pub id: usize,
 }
 
+/// Confidence level of a Cloudflare edge detection verdict.
+///
+/// The confidence is derived from the number and strength of Cloudflare-specific
+/// features detected (TLS certificate fingerprint, CF-Ray header, cdn-cgi/trace, etc.).
+///
+/// - `High`: Multiple strong indicators match (e.g., CF-Ray header + valid trace endpoint)
+/// - `Medium`: At least one reliable indicator matches
+/// - `Low`: Weak or circumstantial indicators only
+/// - `None`: No Cloudflare-specific features detected
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Confidence {
+    /// No Cloudflare-specific features detected.
     None,
+    /// Weak or circumstantial indicators only.
     Low,
+    /// At least one reliable indicator matches.
     Medium,
+    /// Multiple strong indicators match.
     High,
 }
 
+/// Application-layer protocol used for probing.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
+    /// Plain HTTP without TLS.
     Http,
+    /// HTTP over TLS (HTTPS).
     Https,
 }
 
 impl Protocol {
+    /// Returns the URI scheme string for the protocol (`"http"` or `"https"`).
     pub fn scheme(self) -> &'static str {
         match self {
             Self::Http => "http",
@@ -91,25 +154,49 @@ impl Protocol {
     }
 }
 
+/// Geographic and quality information about a confirmed Cloudflare edge node.
+///
+/// Populated when the `cdn-cgi/trace` endpoint returns a valid `colo` (IATA-style)
+/// airport code. Latency and download speed are filled in only if those optional
+/// measurements were requested.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EdgeInfo {
+    /// Three-letter Cloudflare colo code (e.g., `LAX`, `NRT`, `SIN`, `HKG`).
     pub colo_code: Option<String>,
+    /// City name derived from the colo code lookup table.
     pub city: Option<String>,
+    /// ISO 3166-1 alpha-2 country code or name.
     pub country: Option<String>,
+    /// Region / state name if available.
     pub region: Option<String>,
+    /// Measured round-trip latency for the probe connection.
     pub latency: Option<Duration>,
+    /// Measured download throughput in bytes per second (only if speed test was run).
     pub download_speed_bytes_per_sec: Option<u64>,
 }
 
+/// Result of a single Cloudflare edge detection probe.
+///
+/// Contains the edge verdict, HTTP response metadata, confidence assessment,
+/// and optional geographic / quality sub-structure. All fields are publicly
+/// accessible for custom report generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectionResult {
+    /// Final verdict: `true` if the target was classified as a Cloudflare edge node.
     pub is_cloudflare_edge: bool,
+    /// Composite usability flag: edge detection passed *and* HTTP status was healthy.
     pub is_usable: bool,
+    /// HTTP response status code, if the probe received any HTTP response.
     pub http_status_code: Option<u16>,
+    /// Whether the probe used TLS (HTTPS) or plain HTTP.
     pub is_tls: bool,
+    /// Overall [`Confidence`] level of the edge verdict.
     pub confidence: Confidence,
+    /// Short human-readable description of the strongest contributing indicator.
     pub confidence_reason: String,
+    /// Full list of all Cloudflare-specific features that matched during detection.
     pub reasons: Vec<String>,
+    /// Geographic and quality details; `None` if the target is not Cloudflare edge.
     pub edge_info: Option<EdgeInfo>,
 }
 
@@ -128,11 +215,19 @@ impl Default for DetectionResult {
     }
 }
 
+/// Result wrapper associating a detection outcome with its originating [`Target`].
+///
+/// Used for batch-mode APIs; exactly one of `result` or `error` will be populated
+/// per entry — `result` for successful probes, `error` for unrecoverable failures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchResult {
+    /// The target that was probed.
     pub target: Target,
+    /// Successful detection result; `None` if the probe failed.
     pub result: Option<DetectionResult>,
+    /// Error message for failed probes; `None` on success.
     pub error: Option<String>,
+    /// Numeric identifier forwarded from the corresponding [`BatchTarget::id`].
     #[serde(default)]
     pub id: usize,
 }

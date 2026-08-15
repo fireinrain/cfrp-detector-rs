@@ -1,3 +1,12 @@
+//! Multi-threaded download-based throughput measurement.
+//!
+//! The [`SpeedTester`] runs parallel HTTP(S) downloads against a pinned IP
+//! endpoint using [`PinnedConnector`](crate::connector::PinnedConnector) —
+//! bypassing DNS entirely so you can directly compare throughput across
+//! candidate Cloudflare edge IPs. Results include per-stage timing
+//! breakdowns (connect, TLS handshake, TTFB) in addition to the aggregate
+//! bytes-per-second figure.
+
 use crate::{
     DetectorError, Result,
     connector::{ConnectorConfig, HandshakeType, PinnedConnector, Timing},
@@ -12,10 +21,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Tuning parameters for a [`SpeedTester::test`] run.
 #[derive(Debug, Clone)]
 pub struct SpeedTestConfig {
+    /// Hard wall-clock timeout *per concurrent download worker*.
     pub timeout: Duration,
+    /// Number of simultaneous connections opened against the **same** target to saturate bandwidth.
     pub threads_per_target: usize,
+    /// Number of distinct targets that may be tested in parallel (used by helpers, not internally by `test`).
     pub concurrency: usize,
 }
 
@@ -29,22 +42,35 @@ impl Default for SpeedTestConfig {
     }
 }
 
+/// Output of a single-target speed test.
+///
+/// All optional latency fields are only populated for TLS downloads; plain
+/// HTTP runs leave them as `None` so downstream reporters can choose how to
+/// render the missing data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpeedTestResult {
+    /// Target that was tested.
     pub target: Target,
+    /// Aggregate throughput across all worker threads in bytes / second.
     pub bytes_per_second: u64,
+    /// Total wall-clock time consumed by the measurement.
     pub elapsed: Duration,
+    /// TCP connect latency (first worker).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect_latency: Option<Duration>,
+    /// TLS handshake latency (TLS only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_handshake_latency: Option<Duration>,
+    /// Time-to-first-byte after issuing the HTTP request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttfb_latency: Option<Duration>,
+    /// Which TLS handshake variant was negotiated (full / resumed / 0-RTT).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handshake_type: Option<HandshakeType>,
 }
 
 impl SpeedTestResult {
+    /// Builder-style helper that copies latency breakdown fields from a [`Timing`] snapshot.
     pub fn with_timing(mut self, timing: Timing) -> Self {
         self.connect_latency = timing.connect_latency;
         self.tls_handshake_latency = timing.tls_handshake_latency;
@@ -53,6 +79,11 @@ impl SpeedTestResult {
     }
 }
 
+/// Reusable throughput-tester built on top of a pinned HTTP connector.
+///
+/// Cheap to clone (internally reference-counted). A single `SpeedTester` is
+/// tied to one choice of `use_tls` / SNI / `Host` header — if you need to mix
+/// those, build separate testers.
 pub struct SpeedTester {
     connector: Arc<PinnedConnector>,
     use_tls: bool,
@@ -61,6 +92,7 @@ pub struct SpeedTester {
 }
 
 impl SpeedTester {
+    /// Creates a tester with a freshly built [`PinnedConnector`] using the supplied config.
     pub fn new(
         connector_cfg: ConnectorConfig,
         use_tls: bool,
@@ -76,6 +108,8 @@ impl SpeedTester {
         })
     }
 
+    /// Creates a tester that reuses an existing [`PinnedConnector`] (share
+    /// across testers / detectors to amortise TLS session cache costs).
     pub fn with_connector(
         connector: Arc<PinnedConnector>,
         use_tls: bool,
@@ -90,14 +124,19 @@ impl SpeedTester {
         }
     }
 
+    /// Accessor for the inner connector (allows sharing with a [`Detector`]).
     pub fn connector(&self) -> &Arc<PinnedConnector> {
         &self.connector
     }
 
+    /// Current number of entries in the TLS session cache (diagnostic).
     pub fn tls_session_cache_len(&self) -> usize {
         self.connector.tls_session_cache_len()
     }
 
+    /// Enables / disables TLS 0-RTT Early Data on future connections.
+    ///
+    /// Only meaningful when `use_tls = true`; ignored otherwise.
     pub fn set_0rtt_enabled(&self, enabled: bool) {
         self.connector.set_0rtt_enabled(enabled);
     }
@@ -132,6 +171,14 @@ impl SpeedTester {
         }
     }
 
+    /// Runs one multi-threaded speed test against `target` downloading `path`.
+    ///
+    /// Spawns [`SpeedTestConfig::threads_per_target`] concurrent download tasks
+    /// pinned to the exact socket address given by `target`. The final
+    /// bytes-per-second figure is the *sum* of all worker throughput divided
+    /// by total wall time, which models an aggressive multi-connection CDN
+    /// download and better reflects real-world max throughput than a single
+    /// stream would.
     pub async fn test(
         &self,
         target: &Target,

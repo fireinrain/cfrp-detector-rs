@@ -2354,8 +2354,11 @@ fn merge_speedtest_config(cli: &Cli, st: &SpeedTestArgs) -> Result<ConfigFile> {
 
     let args: Vec<String> = std::env::args().collect();
     let cli_has = |flags: &[&str]| -> bool {
-        args.iter()
-            .any(|a| flags.iter().any(|f| a == f || a.starts_with(&format!("{f}="))))
+        args.iter().any(|a| {
+            flags
+                .iter()
+                .any(|f| a == f || a.starts_with(&format!("{f}=")))
+        })
     };
 
     if cli_has(&["-t", "--threads"]) {

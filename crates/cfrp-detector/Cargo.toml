@@ -1,11 +1,17 @@
 [package]
 name = "cfrp-detector"
-version = "0.1.0"
+version.workspace = true
 description = "Cloudflare edge detection and network quality probe library"
 readme = "../../README.md"
 license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+documentation = "https://docs.rs/cfrp-detector"
+keywords = ["cloudflare", "network", "detector", "probe", "networking"]
+categories = ["network-programming", "web-programming::http-client"]
 
 [dependencies]
 anyhow.workspace = true

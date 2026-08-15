@@ -18,22 +18,34 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
+/// Compatibility type alias for callers who imported `ConnectorConfig` from older revisions.
 pub type ConnectorConfig = PinnedClientConfig;
 
+/// Tunables for the [`PinnedConnector`]: timeouts, TLS cache sizes, retry policy, …
 #[derive(Debug, Clone)]
 pub struct PinnedClientConfig {
+    /// Deadline for the initial `connect()` TCP call.
     pub connect_timeout: Duration,
+    /// Per-request deadline for reading HTTP response headers + body after sending the request.
     pub request_timeout: Duration,
+    /// MUST be `true` when probing raw Cloudflare edge IPs (self-signed / mismatched hostnames).
     pub accept_invalid_certs: bool,
+    /// HTTP `User-Agent` header value sent with every GET request issued by this connector.
     pub user_agent: String,
+    /// When `true` a memory TLS session cache is installed (ClientHello skips non-PSK exchanges).
     pub tls_session_cache: bool,
+    /// Deprecated alias for `tls_session_cache_max_entries`; both are honoured and the max wins.
     pub tls_session_cache_size: usize,
+    /// Maximum number of cached TLS sessions (resumption + 0-RTT keys).
     pub tls_session_cache_max_entries: usize,
+    /// When `true` the connector advertises and accepts TLS 1.3 Early Data (0-RTT).
     pub enable_0rtt: bool,
+    /// Retry backoff policy applied to [`http_get`](PinnedConnector::http_get) / `https_get`.
     pub retry: RetryConfig,
 }
 
 impl Default for PinnedClientConfig {
+    /// Sensible defaults: 2 s connect / 3 s request / session cache 256 entries / no 0-RTT.
     fn default() -> Self {
         Self {
             connect_timeout: Duration::from_secs(2),
@@ -101,6 +113,9 @@ impl ServerCertVerifier for SkipCertVerification {
     }
 }
 
+/// Builds a [`rustls::ClientConfig`] with pinned-server behaviour (certificate validation
+/// is intentionally skipped because we probe raw IPs), using the default session-cache size
+/// of 2048 entries. See [`build_rustls_client_config_sized`] if you need the cache handle back.
 pub fn build_rustls_client_config(
     enable_session_resume: bool,
     enable_0rtt: bool,
@@ -108,6 +123,9 @@ pub fn build_rustls_client_config(
     build_rustls_client_config_sized(enable_session_resume, enable_0rtt, 2048).0
 }
 
+/// Same as [`build_rustls_client_config`] but with a caller-chosen session-cache capacity.
+/// Returns the shared [`ClientConfig`] *and* the handle to the session cache (if enabled) so
+/// owners can inspect its length / share it across connectors.
 pub fn build_rustls_client_config_sized(
     enable_session_resume: bool,
     enable_0rtt: bool,
@@ -142,6 +160,8 @@ pub fn build_rustls_client_config_sized(
     (Arc::new(builder), cache_arc)
 }
 
+/// Opens a TCP connection to `addr` with a hard `timeout` wrapper; maps timeouts and
+/// OS-level errors to [`DetectorError::NetworkIo`].
 pub async fn connect_tcp(addr: SocketAddr, timeout: Duration) -> Result<TcpStream> {
     tokio::time::timeout(timeout, TcpStream::connect(addr))
         .await
@@ -154,6 +174,9 @@ pub async fn connect_tcp(addr: SocketAddr, timeout: Duration) -> Result<TcpStrea
         .map_err(DetectorError::NetworkIo)
 }
 
+/// Performs the rustls TLS client handshake on an *already connected* `stream`, using the
+/// given `sni` (can be an IP literal or a hostname). Invalid SNIs surface as
+/// [`DetectorError::Tls`].
 pub async fn connect_tls<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
     sni: &str,
@@ -168,10 +191,16 @@ pub async fn connect_tls<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         .map_err(|e| DetectorError::Tls(e.to_string()))
 }
 
+/// Outcome class of a TLS handshake performed through the pinned connector.
+///
+/// Serialised as the lowercase strings `"full"`, `"resumed"`, `"0rtt"` when crossing JSON.
 #[derive(Debug, Clone)]
 pub enum HandshakeType {
+    /// Complete round-trip ClientHello / ServerHello + key derivation.
     FullHandshake,
+    /// Session-ID / ticket based abbreviated handshake (no client certificate verify).
     Resumed,
+    /// TLS 1.3 0-RTT Early Data handshake (application data sent alongside ClientHello).
     ZeroRtt,
 }
 
@@ -211,8 +240,17 @@ impl<'de> serde::Deserialize<'de> for HandshakeType {
     }
 }
 
+/// Direct endpoint-pinning HTTP/HTTPS client.
+///
+/// Unlike a typical HTTP client this type never resolves DNS: you always supply
+/// an explicit [`SocketAddr`] and a *separate* TLS SNI / HTTP `Host` header.
+/// This is exactly the semantics Cloudflare edge detection needs because we
+/// are checking whether *this specific IP address* terminates TLS for a given
+/// anycast hostname.
 pub struct PinnedConnector {
+    /// Config snapshot this connector was built with (timeouts, retry, cache sizes…).
     pub config: PinnedClientConfig,
+    /// Standard rustls client config (no 0-RTT Early Data advertised).
     pub rustls_config: Arc<ClientConfig>,
     zero_rtt_config: Arc<ClientConfig>,
     enable_0rtt: parking_lot::Mutex<bool>,
@@ -221,6 +259,8 @@ pub struct PinnedConnector {
 }
 
 impl PinnedConnector {
+    /// Creates a new pinned connector, pre-building both the normal and the 0-RTT rustls
+    /// client configs plus the shared session memory cache.
     pub fn new(config: PinnedClientConfig) -> Result<Self> {
         let max_entries = config
             .tls_session_cache_max_entries
@@ -239,6 +279,7 @@ impl PinnedConnector {
         })
     }
 
+    /// Returns the appropriate rustls config depending on whether 0-RTT has been toggled on.
     pub fn active_rustls_config(&self) -> Arc<ClientConfig> {
         if *self.enable_0rtt.lock() {
             self.zero_rtt_config.clone()
@@ -247,18 +288,24 @@ impl PinnedConnector {
         }
     }
 
+    /// Returns the number of entries in the TLS session memory cache (currently always `0`;
+    /// reserved for future instrumentation).
     pub fn tls_session_cache_len(&self) -> usize {
         0
     }
 
+    /// Enables or disables TLS 1.3 0-RTT Early Data at runtime without rebuilding the connector.
     pub fn set_0rtt_enabled(&self, enabled: bool) {
         *self.enable_0rtt.lock() = enabled;
     }
 
+    /// Convenience wrapper around [`connect_tcp`] that uses the configured connect timeout.
     pub async fn connect_http_tcp(&self, addr: SocketAddr) -> Result<TcpStream> {
         connect_tcp(addr, self.config.connect_timeout).await
     }
 
+    /// Opens TCP + performs the TLS handshake using `sni`; returns the established TLS stream
+    /// ready for application data to be written / read.
     pub async fn connect_https_pinned(
         &self,
         addr: SocketAddr,
@@ -269,26 +316,42 @@ impl PinnedConnector {
     }
 }
 
+/// Fine-grained wall-clock timing breakdowns captured during a probe or download.
 #[derive(Debug, Clone, Default)]
 pub struct Timing {
+    /// TCP `connect()` latency; `None` if the request didn't open a fresh socket.
     pub connect_latency: Option<Duration>,
+    /// TLS handshake latency from ClientHello to Finished; `None` for plain-HTTP requests.
     pub tls_handshake_latency: Option<Duration>,
+    /// Time-to-first-byte of the HTTP response body after sending the request headers.
     pub ttfb_latency: Option<Duration>,
 }
 
+/// Result of [`PinnedConnector::http_get`] / [`PinnedConnector::https_get`]: full status,
+/// headers, body, timing and the negotiated TLS handshake type.
 #[derive(Debug, Clone)]
 pub struct PinnedHttpResponse {
+    /// HTTP response status code (e.g. `200 OK`, `403 Forbidden`).
     pub status: StatusCode,
+    /// HTTP response headers, preserving insertion order and raw casing.
     pub headers: HeaderMap,
+    /// Raw HTTP response body (uncompressed). Empty for responses without a payload.
     pub body: Vec<u8>,
+    /// Wall-clock timing snapshots captured during this request.
     pub timing: Timing,
+    /// Which TLS handshake path was taken (plain HTTP falls back to `FullHandshake`).
     pub handshake_type: HandshakeType,
 }
 
+/// Summary of a successful [`PinnedConnector::http_download`] / `https_download` call:
+/// total bytes received plus the usual timing information.
 #[derive(Debug, Clone)]
 pub struct PinnedDownload {
+    /// How many payload bytes were read from the socket after a 2xx response.
     pub total_bytes: u64,
+    /// Wall-clock timing breakdown captured during the download.
     pub timing: Timing,
+    /// Handshake classification if TLS was negotiated; `None` for plain HTTP downloads.
     pub handshake_type: Option<HandshakeType>,
 }
 
@@ -356,6 +419,9 @@ impl PinnedConnector {
         })
     }
 
+    /// Performs a plain HTTP `GET path` directly against `addr` (no DNS resolution), using
+    /// `host` as the HTTP `Host` header; the call is retried using the configured retry
+    /// policy on transient errors.
     pub async fn http_get(
         &self,
         addr: SocketAddr,
@@ -436,6 +502,9 @@ impl PinnedConnector {
         })
     }
 
+    /// HTTPS variant of [`PinnedConnector::http_get`]: opens a pinned TCP connection to
+    /// `addr`, performs TLS with `sni` (may differ from `addr`), then issues `GET path`
+    /// using `host` as the HTTP Host header. Retries transient failures per config.
     pub async fn https_get(
         &self,
         addr: SocketAddr,
@@ -456,6 +525,9 @@ impl PinnedConnector {
         .await
     }
 
+    /// Plain HTTP variant of [`PinnedConnector::https_download`]: connects to `addr`
+    /// via TCP, issues the GET, validates the 2xx status and returns the total byte
+    /// count plus a per-phase timing breakdown.
     pub async fn http_download(
         &self,
         addr: SocketAddr,
@@ -493,6 +565,10 @@ impl PinnedConnector {
         })
     }
 
+    /// Pinned TLS download: connects to `addr`, performs TLS with `sni`, issues
+    /// `GET path` with `host` in the headers, validates a 2xx response and returns
+    /// the total byte count plus TCP/TLS/TTFB timing data. Used as the building
+    /// block for multi-threaded byte-range speed tests.
     pub async fn https_download(
         &self,
         addr: SocketAddr,

@@ -1,3 +1,13 @@
+//! Optional wrapper around the `masscan` binary for large-scale port enumeration.
+//!
+//! The [`MasscanScanner`] drives an external `masscan` process to perform
+//! multi-thousand-PPS SYN scans on whole CIDRs / ASN prefixes, then parses the
+//! JSON output into [`OpenPort`] entries that can be fed into
+//! [`Detector::detect_batch`](crate::Detector::detect_batch).
+//!
+//! This module is opt-in: the rest of the crate functions perfectly without
+//! masscan installed, so callers who only probe known targets can ignore it.
+
 use crate::{DetectorError, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -6,23 +16,33 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// Which mode the [`MasscanScanner`] should run in.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub enum ScanMode {
+    /// Scan all prefixes belonging to a single ASN.
     #[default]
     SingleAsn,
+    /// Scan prefixes for several ASNs in one go.
     BatchAsn,
+    /// Scan a single IP address (useful for tuning rate parameters).
     SingleIp,
+    /// Scan a list of IPs read from a file.
     BatchIp,
 }
 
+/// One entry in an ASN batch file: `ASN:PORTS:TLS_FLAG`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AsnTask {
+    /// AS number to scan (e.g. `13335` for Cloudflare North America).
     pub asn: u32,
+    /// Masscan-style port string, e.g. `443,2053,8443,U:53`.
     pub ports: String,
+    /// Whether downstream callers will treat the result as TLS-capable.
     pub tls: bool,
 }
 
 impl AsnTask {
+    /// Parses a line formatted as `ASN:PORTS:TLS_FLAG` (e.g. `13335:443:1`).
     pub fn parse_line(line: &str) -> Result<Self> {
         let parts: Vec<&str> = line.split(':').collect();
         if parts.len() < 3 {
@@ -43,24 +63,37 @@ impl AsnTask {
     }
 }
 
+/// A single line of masscan JSON output: one `(ip, port)` that answered SYN.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenPort {
+    /// Target IP address that accepted the SYN.
     pub ip: IpAddr,
+    /// Open TCP (or UDP) port number.
     pub port: u16,
 }
 
+/// Tuning parameters for a [`MasscanScanner`] run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MasscanConfig {
+    /// Outgoing network interface name (e.g. `eth0`); inferred when `None`.
     pub interface: Option<String>,
+    /// Packet rate in packets/second (masscan's `--rate`). Defaults to 10 000.
     pub rate: u64,
+    /// How long to wait after the last TX for straggler replies, in seconds.
     pub wait_seconds: u64,
+    /// Explicit path to the `masscan` binary; `None` falls back to `./masscan`
+    /// and then `PATH`.
     pub masscan_binary_path: Option<PathBuf>,
+    /// Directory where per-ASN CIDR files are cached (1 day TTL).
     pub asn_cache_dir: PathBuf,
+    /// Path to the optional interface-setting override file (one `iface` line).
     pub iface_setting_file: PathBuf,
+    /// User-Agent used for auxiliary HTTP calls made by this module (ASN list, …).
     pub user_agent: String,
 }
 
 impl MasscanConfig {
+    /// Returns a config with sensible defaults (10k pps, 3s wait, asn/ cache dir).
     pub fn new() -> Self {
         Self {
             interface: None,
@@ -74,20 +107,27 @@ impl MasscanConfig {
     }
 }
 
+/// Minimal representation of a network interface (name only).
 #[derive(Debug, Clone)]
 pub struct NetworkInterface {
+    /// OS-level interface name (e.g. `eth0`, `en0`, `wlan0`).
     pub name: String,
 }
 
+/// Owns a [`MasscanConfig`] and provides helpers to spawn the masscan binary.
 pub struct MasscanScanner {
+    /// Runtime configuration used by every method on this scanner.
     pub cfg: MasscanConfig,
 }
 
 impl MasscanScanner {
+    /// Wraps a config into a new scanner instance.
     pub fn new(cfg: MasscanConfig) -> Self {
         Self { cfg }
     }
 
+    /// Resolves the masscan binary path in priority order: explicit override →
+    /// `./masscan` in the current directory → bare `masscan` via `PATH`.
     pub fn resolve_masscan_cmd(&self) -> PathBuf {
         if let Some(p) = self.cfg.masscan_binary_path.as_ref()
             && p.exists()
@@ -465,12 +505,18 @@ pub fn clear_cache(asn_dir: &Path, setting_file: &Path) -> Result<()> {
     Ok(())
 }
 
+/// End-to-end pipeline config: masscan + batch detection + optional speed test.
 #[derive(Debug, Clone)]
 pub struct ScanPipelineConfig {
+    /// Masscan scanner parameters (rate, iface, binary path, …).
     pub masscan: MasscanConfig,
+    /// Max in-flight [`Detector::detect`](crate::Detector::detect) calls after the scan.
     pub detector_concurrency: usize,
+    /// `true` → run a [`SpeedTester`] pass on every confirmed CF edge host.
     pub speedtest: bool,
+    /// Thread count per speed test (multi-part HTTP range downloaders).
     pub speedtest_threads: usize,
+    /// Directory where per-ASN JSON output artefacts are written.
     pub output_dir: PathBuf,
 }
 

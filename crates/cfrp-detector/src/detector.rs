@@ -1,3 +1,15 @@
+//! The primary `Detector` engine, batch processing, and adaptive concurrency.
+//!
+//! This module is the heart of the library: [`Detector`] bundles together the
+//! TLS/HTTP probe engine, Cloudflare CIDR data, geolocation data, and an
+//! optional resource governor into a single reusable component. It exposes
+//! both single-target and adaptive batch APIs.
+//!
+//! The adaptive concurrency mechanism uses an AIMD (additive-increase /
+//! multiplicative-decrease) algorithm driven by probe success rate, with
+//! additional hard constraints from the `ResourceGovernor` (file descriptor
+//! ceiling, sliding-window resource-error ratio).
+
 use crate::{DetectorError, Result};
 use crate::{
     cidr::CidrSource,
@@ -16,28 +28,52 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// Snapshot of resource-governor state forwarded from the governor to the
+/// progress callback. Allows callers to log or visualise back-pressure events.
 #[derive(Debug, Clone, Default)]
 pub struct GovernorFeedback {
+    /// Latest governor snapshot if the governor is enabled.
     pub snapshot: Option<GovernorSnapshot>,
 }
 
+/// Progress update delivered through the batch progress callback.
+///
+/// Emitted after every single probe completion (success *or* failure) so that
+/// UIs can render live progress indicators and statistics.
 #[derive(Debug, Clone, Default)]
 pub struct BatchProgress {
+    /// Number of probes finished so far.
     pub completed: usize,
+    /// Total number of probes in the current batch.
     pub total: usize,
+    /// Concurrency level currently being used by the adaptive algorithm.
     pub current_concurrency: usize,
+    /// Whether the most recently finished probe succeeded.
     pub last_success: bool,
+    /// The most recently processed target, if available.
     pub last_target: Option<Target>,
+    /// `true` when the governor just throttled concurrency because of FD pressure.
     pub throttled_due_to_fd: bool,
+    /// Deeper governor internal snapshot.
     pub governor_feedback: GovernorFeedback,
 }
 
+/// Parameters for the AIMD adaptive concurrency controller.
+///
+/// When enabled, the detector starts at `initial` concurrent probes and
+/// adjusts the level up (additive) on success or down (multiplicative) on
+/// failure, bounded by `min`..`max` and smoothed over the last `window` events.
 #[derive(Debug, Clone)]
 pub struct AdaptiveConfig {
+    /// Master toggle for AIMD adaptive concurrency.
     pub enabled: bool,
+    /// Starting concurrency value.
     pub initial: usize,
+    /// Hard floor for concurrency (≥1).
     pub min: usize,
+    /// Hard ceiling for concurrency.
     pub max: usize,
+    /// Sliding-window size (number of events) used for smoothing.
     pub window: usize,
 }
 
@@ -53,12 +89,21 @@ impl Default for AdaptiveConfig {
     }
 }
 
+/// Top-level configuration for [`Detector`].
+///
+/// Aggregates probe options, HTTP cache settings, concurrency limits, and
+/// resource-governor tuning. Use [`DetectorConfig::default()`] for sane defaults.
 #[derive(Debug, Clone)]
 pub struct DetectorConfig {
+    /// Low-level HTTP/TLS probe knobs (timeouts, SNI, TLS session cache).
     pub probe: ProbeConfig,
+    /// Local HTTP cache configuration for Cloudflare CIDR / colo lookups.
     pub cache: crate::CacheConfig,
+    /// Maximum allowed concurrent probes (upper bound; adaptive stays ≤ this).
     pub max_concurrency: usize,
+    /// Whether the resource governor is active. Always enable in production.
     pub governor_enabled: bool,
+    /// Fine tuning for the resource governor (FD headroom, thresholds, etc.).
     pub governor: ResourceGovernorConfig,
 }
 
@@ -74,17 +119,46 @@ impl Default for DetectorConfig {
     }
 }
 
+/// Main Cloudflare edge detection engine.
+///
+/// `Detector` is cheap to clone (internally reference-counted) and safe to
+/// share across tasks. Create one instance per process, configure it with
+/// [`DetectorConfig`], and reuse it for all probes — it caches TLS sessions,
+/// HTTP clients, Cloudflare CIDR ranges, and geolocation data internally.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use cfrp_detector::{Detector, DetectorConfig, Target};
+/// # use std::net::{IpAddr, Ipv4Addr};
+/// # #[tokio::main] async fn main() -> anyhow::Result<()> {
+/// let cfg = DetectorConfig::default();
+/// let detector = Detector::new(cfg).await?;
+/// let target = Target::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
+/// let result = detector.detect(&target, Some("cloudflare.com")).await?;
+/// println!("is edge = {}", result.is_cloudflare_edge);
+/// # Ok(()) }
+/// ```
 pub struct Detector {
     #[allow(dead_code)]
     client: Arc<Client>,
     ranges: Arc<CloudflareRanges>,
     locations: Arc<dyn LocationSource>,
+    /// Active configuration (read-only after construction).
     pub cfg: DetectorConfig,
     governor: Option<Arc<ResourceGovernor>>,
     probe_engine: Arc<ProbeEngine>,
 }
 
 impl Detector {
+    /// Builds a new detector, loading Cloudflare CIDR ranges and colo
+    /// geolocation data from their authoritative sources (using the built-in
+    /// HTTP cache as configured).
+    ///
+    /// # Errors
+    ///
+    /// Fails if the network fetches for CIDR ranges or the colo mapping fail
+    /// fatally and no cached fallback is available.
     pub async fn new(cfg: DetectorConfig) -> Result<Self> {
         let client = Arc::new(
             ClientBuilder::new()
@@ -118,6 +192,9 @@ impl Detector {
         })
     }
 
+    /// Builds a detector using caller-provided data sources (dependency
+    /// injection). Useful for tests or when you want to pre-load / cache
+    /// CIDR ranges and colo data yourself.
     pub fn with_data_sources(
         cfg: DetectorConfig,
         client: Client,
@@ -145,14 +222,26 @@ impl Detector {
         }
     }
 
+    /// Returns a reference to the resource governor, if enabled.
     pub fn governor(&self) -> Option<&ResourceGovernor> {
         self.governor.as_deref()
     }
 
+    /// Returns a reference to the inner probe engine for advanced use cases.
     pub fn probe_engine(&self) -> &ProbeEngine {
         &self.probe_engine
     }
 
+    /// Runs the full multi-layer Cloudflare edge detection pipeline against a single target.
+    ///
+    /// Detection layers (in order):
+    /// 1. Cloudflare official CIDR membership (from `CloudflareRanges`)
+    /// 2. TLS leaf / intermediate certificate fingerprinting
+    /// 3. HTTP response headers (`Server: cloudflare`, `CF-Ray`, `CF-Cache-Status`, …)
+    /// 4. Optional `cdn-cgi/trace` endpoint + colo geolocation
+    ///
+    /// `domain` overrides the TLS SNI and HTTP `Host` header; pass `None` to use
+    /// the configured default (`cloudflare.com`).
     pub async fn detect(&self, target: &Target, domain: Option<&str>) -> Result<DetectionResult> {
         let mut result = DetectionResult::default();
         let in_range = self.ranges.contains(target.ip);
@@ -243,6 +332,13 @@ impl Detector {
         Ok(result)
     }
 
+    /// Fetches geographic / quality [`EdgeInfo`] for a target already known to
+    /// be a Cloudflare edge node by hitting its `/cdn-cgi/trace` endpoint and
+    /// looking up the returned `colo=` code in the geolocation store.
+    ///
+    /// Returns `Ok(None)` if the trace endpoint does not yield a colo code —
+    /// this means the target is not actually serving a Cloudflare edge stack
+    /// even if other heuristics matched.
     pub async fn fetch_edge_info(
         &self,
         target: &Target,
@@ -281,6 +377,11 @@ impl Detector {
         Ok(Some(info))
     }
 
+    /// Runs detection for a batch of targets using a fixed concurrency level.
+    ///
+    /// Results are returned in the *same order* as the input `targets` slice.
+    /// Every entry contains either a successful [`DetectionResult`] or an error
+    /// string — the method never panics on per-target failures.
     pub async fn detect_batch(
         &self,
         targets: &[BatchTarget],
@@ -297,6 +398,14 @@ impl Detector {
         .await
     }
 
+    /// Batch detection with full control over adaptive concurrency, graceful
+    /// cancellation, and a per-probe progress callback.
+    ///
+    /// The `cancel` token lets you shut down the batch early (e.g. on `SIGINT`);
+    /// in-flight probes are aborted and their slots are marked with
+    /// `error = "cancelled"` in the returned vector. Progress events fire
+    /// synchronously on the task driving the method, so keep the callback
+    /// cheap (send through a channel if you need to do heavy work).
     pub async fn detect_batch_with_cancel<F>(
         &self,
         targets: &[BatchTarget],
@@ -584,11 +693,21 @@ impl Detector {
             .collect()
     }
 
+    /// Convenience one-shot constructor + probe for ad-hoc scripts and tests.
+    ///
+    /// Builds a brand new [`Detector`] internally (loading CIDR / colo data)
+    /// and runs a single detection. Prefer [`Detector::new`] + reuse when you
+    /// have more than one target to check.
     pub async fn detect_oneshot(target: &Target, domain: Option<&str>) -> Result<DetectionResult> {
         let detector = Self::new(DetectorConfig::default()).await?;
         detector.detect(target, domain).await
     }
 
+    /// Batch detection with optional AIMD adaptive concurrency and a
+    /// per-probe progress callback.
+    ///
+    /// Equivalent to [`Detector::detect_batch_with_cancel`] but without a
+    /// cancellation token; internally passes one that never fires.
     pub async fn detect_batch_with_progress<F>(
         &self,
         targets: &[BatchTarget],
